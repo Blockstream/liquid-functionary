@@ -1,0 +1,43 @@
+###
+### If you modify this file, please re-run `./contrib/revendor.sh` to update
+### the dependencies. See README.md for details.
+###
+
+[workspace]
+members = [
+    "blocksigner",
+    "functionary_common",
+    "functionary_logs",
+    "functionary",
+    "hsm_update_tool",
+    "parallel_port",
+    "init_hsm",
+    "watchman",
+]
+
+exclude = [
+    "hsm/rust-hsm",
+]
+
+[profile.dev]
+opt-level = 0      # controls the `--opt-level` the compiler builds with
+debug = true       # controls whether the compiler passes `-g`
+rpath = false      # controls whether the compiler passes `-C rpath`
+lto = false        # controls `-C lto` for binaries and staticlibs
+debug-assertions = true # controls whether debug assertions are enabled
+codegen-units = 1  # controls whether the compiler passes `-C codegen-units`
+                   # `codegen-units` is ignored when `lto = true`
+panic = 'abort'    # abort on panic
+
+[profile.release]
+opt-level = 3      # controls the `--opt-level` the compiler builds with
+debug = true       # controls whether the compiler passes `-g`
+rpath = false      # controls whether the compiler passes `-C rpath`
+lto = false        # controls `-C lto` for binaries and staticlibs
+debug-assertions = true # controls whether debug assertions are enabled
+codegen-units = 1  # controls whether the compiler passes `-C codegen-units`
+                   # `codegen-units` is ignored when `lto = true`
+panic = 'abort'    # abort on panic
+
+[profile.bench]
+debug = true

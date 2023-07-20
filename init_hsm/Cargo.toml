@@ -1,0 +1,22 @@
+###
+### If you modify this file, please re-run `./contrib/revendor.sh` to update
+### the dependencies. See README.md for details.
+###
+
+[package]
+name = "init_hsm"
+version = "2.0.0"
+authors = ["Blockstream <support@blockstream.com>"]
+description = "HSM Initialization Tool"
+
+[[bin]]
+name = "init_hsm"
+path = "src/main.rs"
+
+[dependencies]
+serde = "1.0"
+serde_derive = "1.0"
+toml = "0.5"
+
+functionary = { path = "../functionary" }
+functionary_logs = { path = "../functionary_logs/" }

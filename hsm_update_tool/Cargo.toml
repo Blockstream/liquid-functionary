@@ -1,0 +1,34 @@
+###
+### If you modify this file, please re-run `./contrib/revendor.sh` to update
+### the dependencies. See README.md for details.
+###
+
+[package]
+name = "hsm_update_tool"
+version = "2.0.0"
+authors = ["Blockstream <support@blockstream.com>"]
+description = "HSM Update Tool"
+
+[[bin]]
+name = "hsm_update_tool"
+path = "src/main.rs"
+
+[dependencies]
+byteorder = "1.2"
+base64 = "0.9.3"
+bitcoin = "0.28.1"
+rand = "0.6.5"
+getargs = "0.4.1"
+
+[dependencies.functionary]
+path = "../functionary"
+
+[dependencies.functionary_common]
+path = "../functionary_common"
+
+[dependencies.functionary_logs]
+path = "../functionary_logs/"
+
+[[bin]]
+name = "hsm_update_tests"
+path = "src/bin/update_tests.rs"
