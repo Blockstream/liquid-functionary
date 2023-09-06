@@ -144,8 +144,8 @@ impl Params {
         matches!(self.status, ParamsStatus::Activated)
     }
 
-    /// Sets this `Params` status to Proposed.
-    /// Returns `ParamsStatus::Proposed` as a convenience for callers.
+    /// Sets this `Params` status to Activated.
+    /// Returns `ParamsStatus::Activated` as a convenience for callers.
     pub fn set_activated(&mut self) -> ParamsStatus {
         self.status = ParamsStatus::Activated;
         ParamsStatus::Activated

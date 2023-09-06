@@ -915,13 +915,29 @@ impl rotator::Rotator for BlockSigner {
 
                 let n_signers = self.peers.consensus().count();
                 let height = block_clone.header.height as u64;
-                if let Some(target) = self.cpe_set.target_params(current_root, height, n_signers) {
-                    // if the block should contain the target descriptors
-                    // but does not, then log it
-                    if !check_descriptors(&block_clone, current_root, target) {
-                        slog!(BlockNoCommitments, height: height, block_hash: block_hash);
+                let commitments_valid = if let Some(target) = self.cpe_set.target_params(current_root, height, n_signers) {
+                    match check_descriptors(&block_clone, current_root, target) {
+                        DescriptorCommitments::None => {
+                            if should_contain_descriptors(current_root, target) {
+                                slog!(CpeCommitmentsNotFound, height: height, block_hash: block_hash);
+                                // didn't find the expected commitments
+                                false
+                            } else {
+                                true
+                            }
+                        },
+                        DescriptorCommitments::Mismatch => {
+                            // the commitments don't match our expected CPE
+                            false
+                        },
+                        DescriptorCommitments::Found => {
+                            slog!(CpeCommitmentsFound, height: height, block_hash: block_hash);
+                            true
+                        },
                     }
-                }
+                } else {
+                    true
+                };
 
                 let mut dummy_txin = bitcoin::TxIn::default();
                 let result = params.signblock_descriptor.satisfy(
@@ -935,12 +951,13 @@ impl rotator::Rotator for BlockSigner {
                 );
 
                 if result.is_ok() {
-                    // This assert is a last-ditch effort: ideally we should do a
-                    // check at precommit time that we are dealing with segwit-only
-                    // descriptors
-                    assert!(dummy_txin.script_sig.is_empty());
-                    *signblock_witness = dummy_txin.witness.to_vec();
-                    true
+                    if commitments_valid {
+                        assert!(dummy_txin.script_sig.is_empty());
+                        *signblock_witness = dummy_txin.witness.to_vec();
+                        true
+                    } else {
+                        false
+                    }
                 } else {
                     slog!(RoundFailedSignatures, error: "could not satisfy".to_owned());
                     false
@@ -1268,41 +1285,49 @@ impl rotator::Rotator for BlockSigner {
     }
 }
 
-/// Checks if the given block has the signblock and fedpeg descriptors.
-/// Only returns false when:
-/// 1. The target CPE has not been proposed and the block doesn't contain the descriptors.
-/// 2. The target CPE has been activated and the block should contain the descriptors but doesn't.
-fn check_descriptors(block: &elements::Block, current_root: sha256::Midstate, target: &dynafed::Params) -> bool {
+/// The state of the signblock and fedpeg descriptor commitments found in a block.
+enum DescriptorCommitments {
+    /// Either one or both of the commitments were not found in the block.
+    None,
+    /// The commitments were found in the block, but don't match the expected descriptors.
+    Mismatch,
+    /// The expected commitments were found in the block.
+    Found,
+}
+
+/// Determines if a block should contain the commitment descriptors.
+fn should_contain_descriptors(current_root: sha256::Midstate, target: &dynafed::Params) -> bool {
     let target_root = target.params.calculate_root();
 
     if current_root != target_root {
-        if target.never_proposed() {
-            // proposal block
-            has_target_descriptors(block, target)
-        }
-        else {
-            true
-        }
-    } else if target.never_activated() {
-        // activation block
-        has_target_descriptors(block, target)
+        // block should contain the descriptors only if the target CPE has not been proposed before
+        target.never_proposed()
+    } else {
+        // block should contain the descriptors only if the target CPE has not been activated before
+        target.never_activated()
     }
-    else {
-        true
+}
+
+/// Checks if the given block has the signblock and fedpeg descriptors.
+fn check_descriptors(block: &elements::Block, current_root: sha256::Midstate, target: &dynafed::Params) -> DescriptorCommitments {
+    if should_contain_descriptors(current_root, target) {
+        has_target_descriptors(block, target)
+    } else {
+        DescriptorCommitments::None
     }
 }
 
 /// Returns true if the block has the expected signblock and watchman descriptors.
-fn has_target_descriptors(block: &elements::Block, target: &dynafed::Params) -> bool {
+fn has_target_descriptors(block: &elements::Block, target: &dynafed::Params) -> DescriptorCommitments {
     let (signblock_expected, watchman_expected) = target.normalized_descriptors();
 
     match blockchain::extract_descriptor_strings(block) {
         (Some(signblock_found), Some(watchman_found)) => {
             if signblock_expected.to_string() == signblock_found && watchman_expected.to_string() == watchman_found {
-                true
+                DescriptorCommitments::Found
             }
             else {
-                // error: the commitments don't match the CPE!
+                // error: the commitments in the block proposal don't match the expected CPE descriptors
                 slog!(CpeCommitmentsMismatch,
                     height: block.header.height,
                     block_hash: block.header.block_hash(),
@@ -1311,12 +1336,12 @@ fn has_target_descriptors(block: &elements::Block, target: &dynafed::Params) -> 
                     watchman_found: watchman_found.into(),
                     watchman_expected: watchman_expected.to_string(),
                 );
-                false
+                DescriptorCommitments::Mismatch
             }
         },
         _ => {
             // either one or both of the descriptors were not found
-            false
+            DescriptorCommitments::None
         }
     }
 }

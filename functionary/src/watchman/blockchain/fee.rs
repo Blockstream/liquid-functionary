@@ -23,6 +23,7 @@
 use std::{cmp, error, fmt, io};
 use std::collections::{HashMap, HashSet};
 use bitcoin;
+use bitcoin::OutPoint;
 use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
 
 use common::constants;
@@ -96,7 +97,11 @@ impl ConflictingTransactions {
             None => return Vec::new(),
         };
 
-        // Find conflicts with other txs.
+        self.find_conflicts(inputs)
+    }
+
+    /// Find conflicts with other txs, drop conflicting txs
+    pub fn find_conflicts(&mut self, inputs: HashSet<OutPoint>) -> Vec<bitcoin::Txid> {
         let mut conflicts = Vec::new();
         self.inputs_map.retain(|txid, other_inputs| {
             let conflicting = !inputs.is_disjoint(other_inputs);
@@ -269,6 +274,21 @@ impl Pool {
         self.fee_map.remove(txid);
     }
 
+    /// Return all fees associated with transaction that conflict with the provided transaction
+    pub fn reclaim_conflicting_fees(&mut self, tx: &bitcoin::Transaction) {
+        let mut txinputs = HashSet::new();
+        for input in &tx.input {
+            txinputs.insert(input.previous_output);
+        }
+
+        for txid in &self.conflicting_transactions.find_conflicts(txinputs) {
+            if let Some(amount) = self.fee_map.remove(txid) {
+                self.available_funds += amount as i64;
+                slog!(ReclaimFees, txid: *txid, added: amount, available: self.available_funds);
+            }
+        }
+    }
+
     /// Accessor for the total value temporarily docked
     pub fn temporarily_docked(&self) -> u64 {
         self.fee_map.values().fold(0, |x, y| x + y)
@@ -278,6 +298,11 @@ impl Pool {
     pub fn add(&mut self, amount: u64) {
         self.available_funds += amount as i64;
         slog!(AddFees, added: amount, available: self.available_funds);
+    }
+
+    /// Set funds to the available funds pool
+    pub fn set(&mut self, amount: i64) {
+        self.available_funds = amount;
     }
 
     /// Verifies the fee pool has been cleared out during tests

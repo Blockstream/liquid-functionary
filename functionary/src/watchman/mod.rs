@@ -373,6 +373,8 @@ impl Watchman {
 
         log!(Info, "current rollouts: {:?}", *ROLLOUTS);
 
+        blockchain_manager.fix_available_funds();
+
         // Return
         Watchman {
             secp: Secp256k1::verification_only(),
@@ -467,7 +469,8 @@ impl Watchman {
 
         let state = self.hsm.get_watchman_state().map_err(Error::UpdateHsm)?;
         log!(Debug, "HSM state: {:?}", state);
-        let current_height = self.sidechaind.block_count().map_err(Error::ChainUnavailable)?;
+        let current_confirmed_height =
+            self.sidechaind.block_count().map_err(Error::ChainUnavailable)? - constants::SIDECHAIN_CONFIRMS;
 
         let next_height = if let Some(last) = state.last_header {
             let ret = self.sidechaind.block_confirm_status(last).map_err(Error::ChainUnavailable)?;
@@ -481,6 +484,11 @@ impl Watchman {
             if confirmations < 1 {
                 panic!("HSM has a header that is no longer in the chain: {}", last);
             }
+            else if confirmations < constants::SIDECHAIN_CONFIRMS as i64 {
+                log!(Warn, "HSM has unconfirmed headers. HSM tip: {}", last);
+                return Ok(true);
+            }
+
             height + 1
         } else {
             // We haven't sent any headers yet, so we are going to send the first header.
@@ -490,7 +498,7 @@ impl Watchman {
 
             let epoch_length = self.blockchain_manager.dynafed_epoch_length();
 
-            let epoch_start = (current_height / epoch_length) * epoch_length;
+            let epoch_start = (current_confirmed_height / epoch_length) * epoch_length;
 
             // Make sure dynafed is active.
             let header = self.sidechaind.raw_header_at(epoch_start).map_err(Error::ChainUnavailable)?;
@@ -517,8 +525,8 @@ impl Watchman {
             start
         };
 
-        log!(Debug, "Syncing HSM headers {}..={}", next_height, current_height);
-        for height in next_height ..= current_height {
+        log!(Debug, "Syncing HSM headers {}..={}", next_height, current_confirmed_height);
+        for height in next_height ..= current_confirmed_height {
             let header = self.sidechaind.raw_header_at(height).map_err(Error::ChainUnavailable)?;
             let hash = header.block_hash();
 
@@ -1114,6 +1122,13 @@ impl rotator::Rotator for Watchman {
             // If we're not master, do nothing
             x => {
                 // When we're not master, do a quick resync to avoid race conditions with master.
+                // This non-master sync seems like it would be more likely to create race conditions with Master
+                // as the non-master's will be ahead of where the Master was when it created the proposal in the
+                // first stage. However, in CI it often happens that one non-master syncs to just one block behind
+                // the master and so is not aware of a peg-in claim or peg-out request that the Master includes in a
+                // proposal.
+                // It is generally not a problem that the non-master's are ahead of the master and if we crossed a
+                // dynafed transition there is a grace period built in for peg-in claims and peg-out requests.
                 if let Err(e) = self.blockchain_manager.update_from_rpc(&self.bitcoind, &self.sidechaind) {
                     slog!(RpcSyncFailed, error: e.to_string());
                     self.state = State::Error(Error::SyncFailed(e));

@@ -90,6 +90,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "base64"
+version = "0.13.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9e1b586273c5702936fe7b7d6896644d8be71e6314cfe09d3167c95f712589e8"
+
+[[package]]
 name = "base64-compat"
 version = "1.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -164,7 +170,7 @@ checksum = "bef38d45163c2f1dde094a7dfd33ccf595c92905c8f8f4fdc18d06fb1037718a"
 
 [[package]]
 name = "blocksigner"
-version = "2.1.3"
+version = "2.2.0"
 dependencies = [
  "functionary",
  "functionary_logs",
@@ -308,7 +314,7 @@ checksum = "a06f77d526c1a601b7c4cdd98f54b5eaabffc14d5f2f0296febdc7f357c6d3ba"
 
 [[package]]
 name = "functionary"
-version = "2.1.3"
+version = "2.2.0"
 dependencies = [
  "bitcoin",
  "byteorder 0.3.13",
@@ -317,6 +323,7 @@ dependencies = [
  "functionary_logs",
  "hex-literal",
  "jsonrpc 0.11.0",
+ "jsonrpc 0.15.0",
  "miniscript",
  "serde",
  "serde_derive",
@@ -327,7 +334,7 @@ dependencies = [
 
 [[package]]
 name = "functionary_common"
-version = "2.1.3"
+version = "2.2.0"
 dependencies = [
  "bitcoin",
  "byteorder 0.3.13",
@@ -340,7 +347,7 @@ dependencies = [
 
 [[package]]
 name = "functionary_logs"
-version = "2.1.3"
+version = "2.2.0"
 dependencies = [
  "bitcoin",
  "elements",
@@ -359,7 +366,7 @@ name = "functool"
 version = "0.1.0"
 dependencies = [
  "base32",
- "base64",
+ "base64 0.9.3",
  "bitcoin",
  "elements",
  "functionary",
@@ -374,7 +381,7 @@ dependencies = [
 
 [[package]]
 name = "generate_config"
-version = "2.1.3"
+version = "2.2.0"
 dependencies = [
  "anyhow",
  "bitcoin",
@@ -469,7 +476,7 @@ dependencies = [
 name = "hsm_update_tool"
 version = "2.0.0"
 dependencies = [
- "base64",
+ "base64 0.9.3",
  "bitcoin",
  "byteorder 1.3.1",
  "functionary",
@@ -491,7 +498,7 @@ version = "0.10.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "df0caae6b71d266b91b4a83111a61d2b94ed2e2bea024c532b933dcff867e58c"
 dependencies = [
- "base64",
+ "base64 0.9.3",
  "httparse",
  "language-tags",
  "log 0.3.9",
@@ -568,6 +575,17 @@ dependencies = [
  "base64-compat",
  "serde",
  "serde_derive",
+ "serde_json",
+]
+
+[[package]]
+name = "jsonrpc"
+version = "0.15.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "26ec0b81f8228f2574b66c27c7aa3e73e823ae50dc7133bc208820946bc8581b"
+dependencies = [
+ "base64 0.13.1",
+ "serde",
  "serde_json",
 ]
 
@@ -1215,7 +1233,7 @@ dependencies = [
 
 [[package]]
 name = "test_runner"
-version = "2.1.3"
+version = "2.2.0"
 dependencies = [
  "bitcoin",
  "chrono",
@@ -1397,7 +1415,7 @@ checksum = "cccddf32554fecc6acb585f82a32a72e28b48f8c4c1883ddfeeeaa96f7d8e519"
 
 [[package]]
 name = "watchman"
-version = "2.1.3"
+version = "2.2.0"
 dependencies = [
  "functionary",
  "functionary_logs",

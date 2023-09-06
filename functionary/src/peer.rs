@@ -182,7 +182,6 @@ impl List {
                         slog!(PeerCommKeyMismatch, peer: sending_peer,
                             expected_comm_key: known_peer.comm_pk, claimed_comm_key: comm_key
                         );
-                        ret = false;
                     }
                     if known_peer.sign_pk != sign_key {
                         slog!(PeerSignKeyMismatch, peer: sending_peer,

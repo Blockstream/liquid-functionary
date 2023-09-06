@@ -5,7 +5,7 @@
 
 [package]
 name = "blocksigner"
-version = "2.1.3"
+version = "2.2.0"
 authors = ["Blockstream <support@blockstream.com>"]
 description = "Liquid/Elements Blocksigner"
 
@@ -17,7 +17,7 @@ path = "src/main.rs"
 toml = "0.5"
 
 [dependencies.functionary_logs]
-version = "2.1.3"
+version = "2.2.0"
 path = "../functionary_logs/"
 
 [dependencies.functionary]

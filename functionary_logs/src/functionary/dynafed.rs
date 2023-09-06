@@ -102,7 +102,7 @@ pub struct UnknownParamsActivated {
 
 /// The expected descriptor commitments were not found in the block.
 #[derive(Clone, PartialEq, Eq, Debug, Serialize)]
-pub struct BlockNoCommitments {
+pub struct CpeCommitmentsNotFound {
     pub height: u64,
     pub block_hash: elements::BlockHash,
 }
@@ -116,7 +116,7 @@ pub struct ExpectedDynafedHeader {
 
 /// The descriptor commitments in the block don't match the
 /// descriptors from the target CPE.
-#[derive(Clone, PartialEq, Eq, Debug, Serialize)]
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct CpeCommitmentsMismatch {
     pub height: u32,
     pub block_hash: elements::BlockHash,
@@ -124,6 +124,12 @@ pub struct CpeCommitmentsMismatch {
     pub signblock_expected: String,
     pub watchman_found: String,
     pub watchman_expected: String,
+}
+/// The descriptor commitments were found in the block.
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub struct CpeCommitmentsFound {
+    pub height: u64,
+    pub block_hash: elements::BlockHash,
 }
 
 /// A block proposal had a "current" CPE that we don't understand. This

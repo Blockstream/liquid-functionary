@@ -467,6 +467,16 @@ impl Manager {
         &self.consensus
     }
 
+    /// Validate and fix available_funds based on non_user_funds and docked_fees
+    pub fn fix_available_funds(&mut self) {
+        let mut real_available_funds = self.account.non_user_funds() as i64;
+        real_available_funds -= self.fee_pool.temporarily_docked() as i64;
+        if self.fee_pool.available_funds() != real_available_funds {
+            log!(Error, "Available funds doesn't match: {} vs {}", real_available_funds, self.fee_pool.available_funds());
+            self.fee_pool.set(real_available_funds);
+        }
+    }
+
     /// Shorthand for [Manager::tx_meta].
     #[cfg(test)]
     fn self_tx_meta(&mut self, tx: &bitcoin::Transaction) -> Result<Option<Vec<OutputMeta>>, ProposalError> {
@@ -687,16 +697,7 @@ impl Manager {
                 slog!(FinalizedReclamation, outpoint: reclaimed_utxo.outpoint, txid);
             }
 
-            let fee = {
-                let input_value = reclamation_utxos
-                    .iter()
-                    .map(|i| i.value)
-                    .sum::<u64>();
-                let output_value = tx.tx.output.iter().map(|out| out.value).sum::<u64>();
-                input_value.checked_sub(output_value).expect("canonical")
-            };
-            self_fee_pool.temporarily_dock_tx(&tx.tx, fee);
-            self_fee_pool.confirm(&txid);
+            self_fee_pool.reclaim_conflicting_fees(&tx.tx);
         }
     }
 
@@ -3716,12 +3717,14 @@ pub mod tests {
 
         impl rpc::BitcoinRpc for DummyBitcoind {
             fn raw_header(&self, _hash: bitcoin::BlockHash) -> Result<bitcoin::BlockHeader, jsonrpc::Error> {
-                // This test uses the duration of 24 hours. So, all time diffs <= 24 hrs should be
-                // considered synced. Anything else should be considered not synced
+                // This test uses the duration of 24 hours. So, all time diffs <=
+                // 24 hrs +/- epsilon should be considered synced.
+                // Anything else should be considered not synced
+                let epsilon = 60; // wide enough for CI latency
                 let system_block_time = match self.prev_calls.get() {
                     0 => SystemTime::now() - Duration::from_secs(10), // 10 seconds (synced)
                     1 => SystemTime::now() - Duration::from_secs(60 * 60), // 1 hour (synced)
-                    2 => SystemTime::now() - Duration::from_secs((60 * 60 * 24) - 1), // almost one day (synced)
+                    2 => SystemTime::now() - Duration::from_secs((60 * 60 * 24) - 1 - epsilon), // almost one day (synced)
                     3 => SystemTime::now() - Duration::from_secs(60 * 60 * 25), // 25 hours (not synced)
                     4 => SystemTime::now() - Duration::from_secs(60 * 60 * 24 * 4), // 4 weeks (not synced)
                     5 => SystemTime::now() + Duration::from_secs(60 * 60), // 1 hour in the future (block time is ahead of our time) (synced)

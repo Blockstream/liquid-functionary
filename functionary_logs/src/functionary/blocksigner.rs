@@ -18,9 +18,10 @@
 //!
 
 use std::borrow::Cow;
+use std::str::FromStr;
 
 use bitcoin::hashes::sha256;
-use bitcoin::secp256k1::PublicKey;
+use bitcoin::secp256k1::{ecdsa::Signature, PublicKey};
 use elements;
 use miniscript;
 
@@ -311,21 +312,20 @@ pub struct BlockIncludesDescriptors {
 /// Special implementation to deal with SignState (since it can
 /// either serialize into a single element or into an object --and
 /// that polymorphism confuses something in the elk ingestion.
+#[derive(Deserialize, Serialize)]
+struct CombinedSigCustomSerde {
+    peer: PeerId,
+    result: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    sig: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    hash: Option<String>,
+}
 impl serde::ser::Serialize for CombineSignature {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
         where
             S: serde::ser::Serializer,
         {
-            #[derive(Serialize)]
-            struct CombinedSigSerialize {
-                peer: PeerId,
-                result: String,
-                #[serde(skip_serializing_if = "Option::is_none")]
-                sig: Option<String>,
-                #[serde(skip_serializing_if = "Option::is_none")]
-                hash: Option<String>,
-            }
-
             let (result, sig, hash) = match self.result {
                 SignState::Success(sig) => ("success", Some(sig.to_string()), None),
                 SignState::SelfSuccess(sig) => ("self_success", Some(sig.to_string()), None),
@@ -337,7 +337,7 @@ impl serde::ser::Serialize for CombineSignature {
                 SignState::Errored => ("errored", None, None),
             };
 
-            let sign_state_output = CombinedSigSerialize {
+            let sign_state_output = CombinedSigCustomSerde {
                 peer: self.peer,
                 result: result.to_string(),
                 sig,
@@ -346,4 +346,64 @@ impl serde::ser::Serialize for CombineSignature {
 
             serde::Serialize::serialize(&sign_state_output, serializer)
         }
+}
+
+impl<'de> serde::de::Deserialize<'de> for CombineSignature {
+    fn deserialize<D: serde::de::Deserializer<'de>>(bytes: D) -> Result<Self, D::Error> {
+        let ret = CombinedSigCustomSerde::deserialize(bytes)?;
+        let result = match ret.result.as_str() {
+            "success" => {
+                match Signature::from_str(ret.sig.as_ref().ok_or(serde::de::Error::custom("sig"))?) {
+                    Ok(signature) => SignState::Success(signature),
+                    Err(e) => {
+                        log!(Error, "{}: signature parse of {:?} failed: {}", ret.result, ret.sig, e);
+                        SignState::Errored
+                    }
+                }
+            },
+            "self_success" => {
+                match Signature::from_str(ret.sig.as_ref().ok_or(serde::de::Error::custom("sig"))?) {
+                    Ok(signature) => SignState::SelfSuccess(signature),
+                    Err(e) => {
+                        log!(Error, "{}: signature parse of {:?} failed: {}", ret.result, ret.sig, e);
+                        SignState::Errored
+                    }
+                }
+            },
+            "missing" => SignState::Missing,
+            "no_precommit" => SignState::NoPrecommit,
+            "no_signature" => SignState::NoSignature,
+            "wrong_precommitment" => {
+                match elements::BlockHash::from_str(ret.hash.as_ref().ok_or(serde::de::Error::custom("hash"))?) {
+                    Ok(hash) => SignState::WrongPrecommitment(hash),
+                    Err(e) => {
+                        log!(Error, "{} hash parse of {:?} failed: {}", ret.result, ret.hash, e);
+                        SignState::Errored
+                    }
+                }
+            },
+            "wrong_signature" => {
+                let signature = Signature::from_str(ret.sig.as_ref().ok_or(serde::de::Error::custom("sig"))?);
+                let hash = elements::BlockHash::from_str(ret.hash.as_ref().ok_or(serde::de::Error::custom("hash"))?);
+                match (signature, hash) {
+                    (Ok(sig), Ok(h)) => SignState::WrongSignature{hash:h, sig},
+                    (Ok(_), Err(e)) => {
+                        log!(Error, "{} hash parse of {:?} failed: {}", ret.result, ret.hash, e);
+                        SignState::Errored
+                    },
+                    (Err(e), _) => {
+                        log!(Error, "{} signature parse of {:?} failed: {}", ret.result, ret.sig, e);
+                        SignState::Errored
+                    }
+                }
+            },
+            "errored" => SignState::Errored,
+            &_ => {
+                log!(Error, "result parse of {} unmatched", ret.result);
+                SignState::Errored
+            }
+        };
+
+        Ok(CombineSignature{peer: ret.peer, result})
+    }
 }

@@ -169,10 +169,10 @@ impl_log!("F-D023", Debug, ProposalDynafedActivationSignal<'a>, "dynafed signall
 impl_log!("F-D024", Error, OldCpeProposed, "old cpe proposed");
 impl_log!("F-D025", Error, CpeProposedEarly, "cpe proposed prematurely");
 impl_log!("F-D026", Fatal, ExpectedDynafedHeader, "expected dynafed block header extdata");
-impl_log!("F-D027", Error, CpeCommitmentsMismatch, "descriptor commitments do not match proposed CPE");
+impl_log!("F-D027", Error, CpeCommitmentsMismatch, "descriptor commitments in block proposal do not match expected CPE");
 impl_log!("F-D028", Info, ParamsUpdated, "cpe statuses updated");
-impl_log!("F-D029", Warn, BlockNoCommitments, "block did not contain descriptor commitments");
-impl_log!("F-D030", Info, BlockIncludesDescriptors, "block contains descriptors");
+impl_log!("F-D029", Warn, CpeCommitmentsNotFound, "block did not contain descriptor commitments");
+impl_log!("F-D030", Info, CpeCommitmentsFound, "block contains descriptor commitments");
 impl_log!("F-D031", Warn, PeerStatusMismatch<'a>, "problem integrating peer status");
 
 

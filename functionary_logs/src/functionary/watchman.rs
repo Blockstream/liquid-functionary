@@ -190,7 +190,7 @@ impl serde::Serialize for CsvTweakedChangeAddress {
 }
 
 /// Status of sync'ing a blockchain
-#[derive(Copy, Clone, PartialEq, Eq, Debug, Serialize)]
+#[derive(Copy, Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct WatchmanSyncStatus<'a> {
     /// Which blockchain is being sync'd
     pub blockchain: &'a str,
@@ -729,7 +729,7 @@ pub struct TxUnknownAfterBroadcast {
 
 /// Used to debug the miniscript satisfier that combines the signature
 /// to assemble the final tx.
-#[derive(Clone, PartialEq, Eq, Debug, Serialize)]
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct CombineSigs<'a> {
     pub key: String,
     pub input_idx: usize,
