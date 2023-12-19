@@ -17,6 +17,7 @@ path = "src/main.rs"
 serde = "1.0"
 serde_derive = "1.0"
 toml = "0.5"
+bitcoin_hashes = "0.10.0"
 
 functionary = { path = "../functionary" }
 functionary_logs = { path = "../functionary_logs/" }

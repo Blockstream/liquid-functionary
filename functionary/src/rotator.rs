@@ -37,6 +37,7 @@
 
 use std::sync::mpsc;
 use std::{fmt, thread};
+use std::convert::TryFrom;
 use std::time::{Duration, Instant, SystemTime};
 
 use dynafed;
@@ -46,6 +47,7 @@ use peer;
 use utils::{self, DurationExt};
 
 pub use common::RoundStage;
+use common::Stage;
 
 /// Logs a peer action
 #[macro_export]
@@ -103,7 +105,7 @@ pub struct StageTimer<C> {
     /// Round as of most recent iteration
     round: u64,
     /// Stage within that round
-    stage: usize,
+    stage: Stage,
     /// Master of that round
     master: peer::Id,
     /// Time struct
@@ -120,7 +122,7 @@ impl<C: Clock> StageTimer<C> {
         StageTimer {
             stage_durations: stage_durations,
             peers: initial_peers,
-            stage: 0,
+            stage: Stage::Stage1,
             round: 0,
             master: peer::Id::default(),
             clock: clock,
@@ -136,115 +138,150 @@ impl<C: Clock> StageTimer<C> {
     /// at which it starts, and the `Duration` between now and that time.
     ///
     /// To compute the next round/stage number, we
-    ///     1. Look at the clock time and directly determine which round
-    ///        and stage we expect to be starting next.
-    ///     2. If this is the stage immediately following our previous
-    ///        stage, great! Alternately if this is equal to our previous
-    ///        stage, instead return the following stage (assume we slightly
-    ///        underslept before calling this function).
-    ///     3. If this is after the immediately-following stage, return
-    ///        the stage corresponding to the round start following the
-    ///        computed stage.
-    ///     4. If this is before the previous stage, instead return the
-    ///        stage corresponding to the round start following the
-    ///        previous stage.
+    ///     1.  Look at the clock time and directly determine which round
+    ///         and stage we expect to be starting next.
+    ///     2.  If this is the stage immediately following our previous
+    ///         stage, great! Alternately if this is equal to our previous
+    ///         stage, instead return the following stage (assume we slightly
+    ///         underslept before calling this function).
+    ///     3.  If we believe we are in a stage or round earlier than clock time
+    ///         says it is we have overrun.
+    ///     3a. If we overrun Stage1 and it is still Stage2 the next stage will be an Alternate
+    ///         Stage3 dubbed Stage3b. This stage has the same length as Stage3 and occurs at the
+    ///         same starting time but provides an alternate stage logic for a daemon to implement
+    ///         some catchup logic if the implementor decides to.
+    ///     3b. If we overrun the whole round but end up in Stage1 or Stage2 of the subsequent round
+    ///         the next stage will be Stage3b in the subsequent round.
+    ///     3c. If we overrun into Stage3 of the current round the next round will be Stage1 of the
+    ///         the next round.
+    ///     3d. If we overrun into Stage3 of a later round we the next stage will be Stage1 of the
+    ///         subsequent round.
+    ///     4.  If we believe our round or stage is after the round or stage computed based on the
+    ///         clock time, we have underrun a round/stage. If this occurs, the next stage will be
+    ///         Stage1 of the round after the current round determined by the clock.
     /// This ensures that (a) this function is always monotonic, regardless
-    /// of clock behavior; (b) that it never skips stages within a round;
-    /// (c) that it always returns a stage in the future, according to the
-    /// current clock time (with a nonnegative sleep duration).
+    /// of clock behavior; (b) that it always returns a stage in the future,
+    /// according to the current clock time (with a nonnegative sleep duration).
     ///
     /// Callers need to be aware that the returned round number may not
     /// always increment and that they may need to adjust the master iterator.
-    fn next_stage(&mut self) -> (u64, usize, SystemTime, Duration) {
+    fn next_stage(&mut self) -> (u64, Stage, SystemTime, Duration) {
         let now = self.clock.now();
-        let since_epoch_ms = now
-            .duration_since(SystemTime::UNIX_EPOCH)
-            .expect("1970 in the past")
-            .as_millis_ext();
+        let now_epoch_ms =
+            now.duration_since(SystemTime::UNIX_EPOCH).expect("1970 in the past").as_millis_ext();
         let round_length_ms = self.round_length().as_millis_ext();
 
         // 1. Directly compute next round/stage based on clock.
-        let n_rounds = since_epoch_ms / round_length_ms;
-        let mut start_time_ms = n_rounds * round_length_ms;
-        let mut round_no = n_rounds;
+        let round_by_time = now_epoch_ms / round_length_ms;
+        let mut start_time_ms = round_by_time * round_length_ms;
 
-        let mut stage = 0;
-        while start_time_ms < since_epoch_ms {
-            start_time_ms += self.stage_durations[stage].as_millis_ext();
-            stage += 1;
+        let mut stage_by_time = 0i32;
+        while start_time_ms <= now_epoch_ms {
+            start_time_ms += self.stage_durations[stage_by_time as usize].as_millis_ext();
+            stage_by_time += 1;
         }
 
-        // 2. Check if it is what we expected (or one less)
-        if round_no == self.round && (stage == self.stage || stage == self.stage + 1) {
-            stage = self.stage + 1;
-        } else if round_no > self.round || (round_no == self.round && stage > self.stage + 1) {
-            // 3. If it is *after* the correct stage, adjust and log
-            //    an overrun
-            if stage > 0 {
-                round_no += 1;
-                stage = 0;
-            }
+        let stage_by_time = Stage::try_from(stage_by_time).expect("Must be valid stage");
 
-            // Don't produce an error log when we just started up.
-            if self.round != 0 {
-                let would_be_round;
-                let would_be_stage;
-                if self.stage == self.stage_durations.len() - 1 {
-                    would_be_round = self.round + 1;
-                    would_be_stage = 0;
+        use self::Stage::*;
+        #[derive(Debug)]
+        enum StageEvent {
+            Standard,
+            Overrun,
+            Underrun,
+        }
+
+        let local_round = self.round;
+        let local_stage = self.stage;
+        let (round_result, stage_result, stage_event) = {
+            if round_by_time > local_round {
+                //round overrun
+                if stage_by_time == Stage1 || stage_by_time == Stage2 {
+                    // round overrun and in Stage1 or Stage2
+                    (round_by_time, Stage3b, StageEvent::Overrun)
                 } else {
-                    would_be_round = self.round;
-                    would_be_stage = self.stage + 1;
+                    // round overrun in Stage 3 or 3b
+                    (round_by_time + 1, Stage1, StageEvent::Overrun)
                 }
-                let round_time = self.stage_durations[..self.stage + 1].iter()
-                    .map(|dur| dur.as_millis_ext())
-                    .sum::<u64>();
-                let would_be_start_time_ms = round_length_ms * self.round + round_time;
-
-                slog!(StageOverrun, overrun_round: would_be_round, overrun_stage: would_be_stage,
-                    overrun_ms: since_epoch_ms - would_be_start_time_ms, next_round: round_no,
-                );
-            }
-        } else if round_no < self.round || (round_no == self.round && stage < self.stage) {
-            // 4. If it is *before* the correct stage, adjust and log
-            //    an underrun
-            round_no = self.round + 1;
-            stage = 0;
-
-            let would_be_round;
-            let would_be_stage;
-            if self.stage == self.stage_durations.len() - 1 {
-                would_be_round = self.round + 1;
-                would_be_stage = 0;
+            } else if round_by_time < local_round {
+                //round underrun
+                (local_round + 1, Stage1, StageEvent::Underrun)
+            } else if local_stage == Stage1 && stage_by_time == Stage2 {
+                //stage overrun of Stage 1 and still in Stage 2
+                (local_round, Stage3b, StageEvent::Overrun)
+            } else if local_stage < stage_by_time {
+                //stage overrun in Stage 3 or 3b
+                (round_by_time + 1, Stage1, StageEvent::Overrun)
+            } else if  (local_stage == Stage2 && stage_by_time == Stage1)
+                || (local_stage == Stage3 && stage_by_time == Stage2) {
+                //technically a single stage underrun but we tolerate this
+                let (next_stage, next_round, _ ) = self.next_stage_and_round();
+                (next_round, next_stage, StageEvent::Underrun)
+            } else if local_stage > stage_by_time {
+                //stage underrun
+                (round_by_time + 1, Stage1, StageEvent::Underrun)
+            } else if local_stage.as_duration_index() == stage_by_time.as_duration_index() {
+                let (next_stage, next_round, _ ) = self.next_stage_and_round();
+                (next_round, next_stage, StageEvent::Standard)
             } else {
-                would_be_round = self.round;
-                would_be_stage = self.stage + 1;
+                panic!("Unknown stage transition")
             }
-            let round_time = self.stage_durations[..self.stage + 1].iter()
-                .map(|dur| dur.as_millis_ext())
-                .sum::<u64>();
-            let would_be_start_time_ms = round_length_ms * self.round + round_time;
+        };
 
-            slog!(StageUnderrun, underrun_round: would_be_round,
-                underrun_stage: would_be_stage,
-                underrun_ms: would_be_start_time_ms - since_epoch_ms, next_round: round_no
-            );
-        }
-
-        // Return
-        if stage == self.stage_durations.len() {
-            round_no += 1;
-            stage = 0;
-        }
-        let round_time = self.stage_durations[..stage].iter()
+        let next_stage_time = self.stage_durations[..stage_result.as_duration_index()].iter()
             .map(|dur| dur.as_millis_ext())
             .sum::<u64>();
-        start_time_ms = round_length_ms * round_no + round_time;
+        start_time_ms = round_length_ms * round_result + next_stage_time;
         let to_wait = Duration::from_millis(
-            (start_time_ms - since_epoch_ms) as u64
+            (start_time_ms - now_epoch_ms) as u64
         );
 
-        (round_no, stage, now + to_wait, to_wait)
+        // Log overrun or underrun
+        if self.round != 0 {
+            let (would_be_stage, would_be_round, would_be_start_time_ms)
+                = self.next_stage_and_round();
+            match stage_event {
+                StageEvent::Standard => (),
+                StageEvent::Overrun => {
+                    slog!(StageOverrun, overrun_round: would_be_round, overrun_stage: i32::from(would_be_stage),
+                        overrun_ms: now_epoch_ms - would_be_start_time_ms,
+                        next_round: round_result, next_stage: i32::from(stage_result),
+                    );
+                }
+                StageEvent::Underrun => {
+                    slog!(StageUnderrun, underrun_round: would_be_round, underrun_stage: i32::from(would_be_stage),
+                    underrun_ms: would_be_start_time_ms - now_epoch_ms, next_round: round_result,
+                );
+                }
+            }
+        }
+
+        (round_result, stage_result, now + to_wait, to_wait)
+    }
+
+    /// Calculate the next stage and round under normal conditions
+    fn next_stage_and_round(&self) -> (Stage, u64, u64) {
+        let would_be_round;
+        let would_be_stage;
+
+        if i32::from(self.stage).abs() >= self.stage_durations.len() as i32{
+            would_be_round = self.round + 1;
+            would_be_stage = i32::from(Stage::Stage1);
+        } else {
+            would_be_round = self.round;
+            would_be_stage = i32::from(self.stage) + 1;
+        }
+
+        let next_stage_time = self.stage_durations[..self.stage.as_duration_index()+1].iter()
+            .map(|dur| dur.as_millis_ext())
+            .sum::<u64>();
+        let would_be_start_time_ms = self.round_length().as_millis_ext() * self.round + next_stage_time;
+
+        (
+            Stage::try_from(would_be_stage).expect("Must be valid stage"),
+            would_be_round,
+            would_be_start_time_ms
+        )
     }
 }
 
@@ -260,16 +297,16 @@ impl<C: Clock> Iterator for StageTimer<C> {
             = self.next_stage();
 
         // Special-case first call
-        if self.master == peer::Id::default() && next_stage != 0 {
+        if self.master == peer::Id::default() && next_stage != Stage::Stage1 {
             next_round += 1;
-            let offset = self.stage_durations[next_stage..].iter().sum();
+            let offset = self.stage_durations[next_stage.as_duration_index()..].iter().sum();
             to_wait += offset;
             start_time += offset;
-            next_stage = 0;
+            next_stage = Stage::Stage1;
         }
 
         // Set next round, stage and master
-        if next_stage == 0 {
+        if next_stage == Stage::Stage1 {
             assert!(!self.peers.is_empty());
             let peer_idx = (next_round % self.peers.len() as u64) as usize;
             self.master = self.peers[peer_idx];
@@ -277,15 +314,17 @@ impl<C: Clock> Iterator for StageTimer<C> {
         self.round = next_round;
         self.stage = next_stage;
 
-        slog!(WaitForStage, next_round: next_round, next_stage: next_stage,
+        slog!(WaitForStage, next_round: next_round, next_stage: i32::from(next_stage),
             delay_ms: to_wait.as_millis_ext()
         );
         self.clock.sleep(to_wait);
 
+        let duration = self.stage_durations[self.stage.as_duration_index()];
+
         // Compute the start time of the stage that we actually wind up returning, and return it.
         Some(RoundStage {
-            start_time: start_time,
-            duration: self.stage_durations[self.stage],
+            start_time,
+            duration,
             round: self.round,
             stage: self.stage,
             master: self.master,
@@ -330,7 +369,7 @@ fn start_heartbeat_thread(stage_durations: Vec<Duration>) -> (
             // main thread was stalled and we had no way to detect it, we would queue up
             // round starts and the resulting logs would be very difficult to read.
             let (done_tx, done_rx) = mpsc::sync_channel(0);
-            let expect_dynafed = stage.stage == n_stages - 1;
+            let expect_dynafed = stage.stage.as_duration_index() == n_stages - 1;
 
             if let Err(e) = tx.try_send(MainCtrl::StartStage(stage, done_tx, expect_dynafed)) {
                 log!(Error, "Failed to send heartbeat (start round) message to main thread: {}", e);
@@ -390,6 +429,8 @@ pub trait Rotator: Sized {
         // Start main loop
         let mut current_stage = None;
 
+        use common::Stage::*;
+
         for message in rx_main.iter() {
             match message {
                 // Heartbeat
@@ -400,7 +441,7 @@ pub trait Rotator: Sized {
 
                     // If this is a new round, notify the router about it so that it can stop
                     // handling irrelevant messages and clear up outgoing messages.
-                    if stage.stage == 0 {
+                    if stage.stage == Stage1 {
                         net_tx.send(NetworkCtrl::NewRoundNumber(stage.round as u32))
                             .expect("network thread alive");
                     }
@@ -409,18 +450,20 @@ pub trait Rotator: Sized {
                         log!(Error, "Skipping stage due to overrun of {} ms.", overrun.as_millis_ext());
                     } else {
                         match stage.stage {
-                            0 => {
+                            Stage1=> {
                                 // Do stage 1
                                 self.round_stage1(stage);
                                 self.send_status(stage);
                             },
-                            1 => {
+                            Stage2 => {
                                 self.round_stage2(stage);
                             },
-                            2 => {
+                            Stage3 => {
                                 self.round_stage3(stage);
+                            },
+                            Stage3b => {
+                                self.round_alternate_stage3(stage);
                             }
-                            _ => panic!("We only support 3 stages.")
                         }
                         current_stage = Some(stage);
                     }
@@ -473,11 +516,16 @@ pub trait Rotator: Sized {
     /// React to a round being 2/3 over
     fn round_stage3(&mut self, stage: RoundStage);
 
+    /// React to overrunning Stage 1 into Stage 2 and instead executing the alternate
+    /// Stage 3
+    fn round_alternate_stage3(&mut self, stage: RoundStage) { let _ = stage; }
+
     /// React to a network message
     fn handle_message(&mut self, msg: Message<message::Validated>, stage: RoundStage);
 
     /// Broadcast a status message to all peers
     fn send_status(&mut self, stage: RoundStage);
+
 }
 
 
@@ -504,7 +552,7 @@ pub fn log_rotator(
 
 #[cfg(test)]
 mod tests {
-    use bitcoin::secp256k1::{rand, PublicKey};
+    use bitcoin::secp256k1::PublicKey;
     use std::str::FromStr;
 
     use peer;
@@ -527,7 +575,7 @@ mod tests {
         }
         /// Appends a new "now" to a list that will be returned by the `i`-th call to `now`, where `i`
         /// is the the position of "now" in the list.
-        fn debug_add_now(&mut self, now: SystemTime) {
+        fn _debug_add_now(&mut self, now: SystemTime) {
             self.nows.push(now);
         }
     }
@@ -565,35 +613,43 @@ mod tests {
         let start_time = SystemTime::UNIX_EPOCH + Duration::from_secs(
             17801 * 3600 * 24 + 71058
         ); // 2018-09-27 19:44:18+0000
+        let start_time_plus_1 = start_time + round_dur;
 
         // a closure to reduce the number of times we need to type `.clone()`
         // on the returned `Vec`
         let iterfn = || peers.consensus_ordered_ids();
 
         // Test 1: time stays constant, stage progresses nonetheless
-        let nows = vec![start_time; 4];
+        let nows = vec![start_time, start_time_plus_1, start_time_plus_1, start_time_plus_1, start_time_plus_1];
         let clock = TestClock::new(nows);
         let mut timer = StageTimer::new(stage_dur.clone(), iterfn(), clock);
         assert_eq!(timer.clock.debug_get_sleeps(), vec![]);
+        // A new StageTimer will have round = 0 so the first call will have us wait until the next round
+        // Stage1
         let stage = timer.next().unwrap();
-        assert_eq!(stage.round, 102538497200);
-        assert_eq!(stage.stage, 0);
-        assert_eq!(stage.master, ids[0]);
+        assert_eq!(stage.round, 102538497201);
+        assert_eq!(stage.stage, Stage::Stage1);
+        assert_eq!(stage.master, ids[1]);
+        // Clock and StageTimer agree on round and stage so progress to next stage
+        let stage = timer.next().unwrap();
+        assert_eq!(stage.round, 102538497201);
+        assert_eq!(stage.stage, Stage::Stage2);
         // If the clock shows we should be one stage behind where we
         // are, ignore it (maybe our sleeps were too short or there
         // was a leap second or something)
         let stage = timer.next().unwrap();
-        assert_eq!(stage.round, 102538497200);
-        assert_eq!(stage.stage, 1);
+        assert_eq!(stage.round, 102538497201);
+        assert_eq!(stage.stage, Stage::Stage3);
         // ...but once we're more than one stage ahead of clock, assume
         // something is wrong and start going to the next round start.
         let stage = timer.next().unwrap();
-        assert_eq!(stage.round, 102538497201);
-        assert_eq!(stage.stage, 0);
-        let stage = timer.next().unwrap();
         assert_eq!(stage.round, 102538497202);
-        assert_eq!(stage.stage, 0);
+        assert_eq!(stage.stage, Stage::Stage1);
         assert_eq!(stage.master, ids[0]);
+        let stage = timer.next().unwrap();
+        assert_eq!(stage.round, 102538497203);
+        assert_eq!(stage.stage, Stage::Stage1);
+        assert_eq!(stage.master, ids[1]);
         // First sleep is 0 because start time is divisible by round time;
         // then it sleeps til the start of the next stage; then it starts
         // skipping stages to get to the start of the next round. Sleeps are
@@ -601,8 +657,9 @@ mod tests {
         assert_eq!(
             timer.clock.debug_get_sleeps(),
             vec![
-                Duration::new(0, 0),
+                round_dur,
                 stage_dur[0],
+                stage_dur[0] + stage_dur[1],
                 round_dur,
                 round_dur * 2,
             ]
@@ -620,143 +677,93 @@ mod tests {
         let clock = TestClock::new(nows);
         let mut timer = StageTimer::new(stage_dur.clone(), iterfn(), clock);
         let stage = timer.next().unwrap();
-        assert_eq!(stage.round, 102538497200);
-        assert_eq!(stage.stage, 0);
-        assert_eq!(stage.master, ids[0]);
+        assert_eq!(stage.round, 102538497201);
+        assert_eq!(stage.stage, Stage::Stage1);
+        assert_eq!(stage.master, ids[1]);
         let stage = timer.next().unwrap();
-        assert_eq!(stage.round, 102538497202);
-        assert_eq!(stage.stage, 0);
-        assert_eq!(stage.master, ids[0]);
+        assert_eq!(stage.round, 102538497201);
+        assert_eq!(stage.stage, Stage::Stage2);
+        assert_eq!(stage.master, ids[1]);
         let stage = timer.next().unwrap();
+        //Jump ahead to the far future round but as the Stage would be 1 we go to Stage3b of that round
         assert_eq!(stage.round, 102638497200);
-        assert_eq!(stage.stage, 0);
-        assert_eq!(stage.master, ids[0]);
+        assert_eq!(stage.stage, Stage::Stage3b);
+        assert_eq!(stage.master, ids[1]);
         let stage = timer.next().unwrap();
         assert_eq!(stage.round, 102638497201);
-        assert_eq!(stage.stage, 0);
+        assert_eq!(stage.stage, Stage::Stage1);
         assert_eq!(stage.master, ids[1]);
         assert_eq!(
             timer.clock.debug_get_sleeps(),
             vec![
-                Duration::new(0, 0),
-                round_dur - Duration::from_millis(1),
-                Duration::new(0, 0),
+                round_dur,
+                stage_dur[0] - Duration::from_millis(1),
+                stage_dur[0] + stage_dur[1],
                 round_dur * 100_000_001,
             ]
         );
 
-        // Test 3: Time should allow for normal switching from 0th to 1st stage
+        // Test 3: Time should allow for normal switching through the stages
         let nows = vec![
             start_time,
-            start_time + stage_dur[0],
+            start_time + round_dur + stage_dur[0] - Duration::from_millis(1),
+            start_time + round_dur + stage_dur[0] + stage_dur[1] - Duration::from_millis(1),
+            start_time + 2*round_dur - Duration::from_millis(1),
         ];
         let clock = TestClock::new(nows);
         let mut timer = StageTimer::new(stage_dur.clone(), iterfn(), clock);
-        let stage =  timer.next().unwrap();
-        assert_eq!(stage.round, 102538497200);
-        assert_eq!(stage.stage, 0);
-        assert_eq!(stage.master, ids[0]);
-        let stage =  timer.next().unwrap();
-        assert_eq!(stage.round, 102538497200);
-        assert_eq!(stage.stage, 1);
-        assert_eq!(stage.master, ids[0]);
-
-        // Test 4: Iterator skips stage 2
-        let nows = vec![
-            start_time,
-            start_time + stage_dur[0],
-            start_time + stage_dur[0] + stage_dur[1] + Duration::from_millis(1),
-        ];
-        let clock = TestClock::new(nows);
-        let mut timer = StageTimer::new(stage_dur.clone(), iterfn(), clock);
-        let stage =  timer.next().unwrap();
-        assert_eq!(stage.round, 102538497200);
-        assert_eq!(stage.stage, 0);
-        assert_eq!(stage.master, ids[0]);
-        let stage =  timer.next().unwrap();
-        assert_eq!(stage.round, 102538497200);
-        assert_eq!(stage.stage, 1);
         let stage =  timer.next().unwrap();
         assert_eq!(stage.round, 102538497201);
-        assert_eq!(stage.stage, 0);
+        assert_eq!(stage.stage, Stage::Stage1);
         assert_eq!(stage.master, ids[1]);
+        let stage =  timer.next().unwrap();
+        assert_eq!(stage.round, 102538497201);
+        assert_eq!(stage.stage, Stage::Stage2);
+        assert_eq!(stage.master, ids[1]);
+        let stage =  timer.next().unwrap();
+        assert_eq!(stage.round, 102538497201);
+        assert_eq!(stage.stage, Stage::Stage3);
+        assert_eq!(stage.master, ids[1]);
+        let stage =  timer.next().unwrap();
+        assert_eq!(stage.round, 102538497202);
+        assert_eq!(stage.stage, Stage::Stage1);
+        assert_eq!(stage.master, ids[0]);
+
+        // Test 4: Iterator skips stage 3
+        let nows = vec![
+            start_time,
+            start_time + round_dur + stage_dur[0] - Duration::from_millis(1),
+            start_time + round_dur + stage_dur[0] + stage_dur[1] + Duration::from_millis(1),
+        ];
+        let clock = TestClock::new(nows);
+        let mut timer = StageTimer::new(stage_dur.clone(), iterfn(), clock);
+        let stage =  timer.next().unwrap();
+        assert_eq!(stage.round, 102538497201);
+        assert_eq!(stage.stage, Stage::Stage1);
+        assert_eq!(stage.master, ids[1]);
+        let stage =  timer.next().unwrap();
+        assert_eq!(stage.round, 102538497201);
+        assert_eq!(stage.stage, Stage::Stage2);
+        let stage =  timer.next().unwrap();
+        assert_eq!(stage.round, 102538497202);
+        assert_eq!(stage.stage, Stage::Stage1);
+        assert_eq!(stage.master, ids[0]);
 
         // Test 5: Iterator skips two stages and a full round
         let nows = vec![
             start_time,
-            start_time + round_dur + Duration::from_millis(1),
+            start_time + 2*round_dur + stage_dur[0] + stage_dur[1] + Duration::from_millis(1),
         ];
         let clock = TestClock::new(nows);
         let mut timer = StageTimer::new(stage_dur.clone(), iterfn(), clock);
         let stage = timer.next().unwrap();
-        assert_eq!(stage.round, 102538497200);
-        assert_eq!(stage.stage, 0);
-        assert_eq!(stage.master, ids[0]);
+        assert_eq!(stage.round, 102538497201);
+        assert_eq!(stage.stage, Stage::Stage1);
+        assert_eq!(stage.master, ids[1]);
         let stage = timer.next().unwrap();
-        assert_eq!(stage.round, 102538497202);
-        assert_eq!(stage.stage, 0);
-        assert_eq!(stage.master, ids[0]);
-
-        // Test 6: Runs two StageTime iterators with randomly but
-        // monotonically increasing clocks and checks if they agree
-        // on stage and master in the end.
-        for _ in 0..1000 {
-            fn rand_duration(round_dur: Duration) -> Duration {
-                let max_clock_add = 2 * round_dur.as_millis_ext() as u64;
-                let rand = rand::random::<u8>() as u64 % max_clock_add;
-                Duration::from_millis(rand)
-            }
-
-            fn last_sleep_duration(timer: &StageTimer<TestClock>) -> Duration {
-                *timer.clock.debug_get_sleeps().last().unwrap()
-            }
-
-            // Initialize clock with randomized start time
-            let mut now1 = start_time;
-            let mut now2 = start_time;
-            let clock1 = TestClock::new(vec![]);
-            let clock2 = TestClock::new(vec![]);
-            let mut timer1 = StageTimer::new(stage_dur.clone(), iterfn(), clock1);
-            let mut timer2 = StageTimer::new(stage_dur.clone(), iterfn(), clock2);
-
-            // Add random durations to clock, without taking sleep into account
-            let n_stages = 5;
-            let mut last_stage1;
-            let mut last_stage2;
-            loop {
-                now1 = now1 + rand_duration(round_dur);
-                now2 = now2 + rand_duration(round_dur);
-                timer1.clock.debug_add_now(now1);
-                timer2.clock.debug_add_now(now2);
-                last_stage1 = timer1.next().unwrap();
-                last_stage2 = timer2.next().unwrap();
-                // Break loop if clock1 exceeds stop time
-                if now1 >= start_time + round_dur * n_stages {
-                    break;
-                }
-            }
-
-            // Now just add the sleep duration to the clock without adding
-            // randomization. That should synchronize the clocks again.
-            now1 = now1 + last_sleep_duration(&timer1);
-            now2 = now2 + last_sleep_duration(&timer2);
-            timer1.clock.debug_add_now(now1);
-            timer2.clock.debug_add_now(now2);
-            while now1 < now2 {
-                last_stage1 = timer1.next().unwrap();
-                now1 = now1 + last_sleep_duration(&timer1);
-                timer1.clock.debug_add_now(now1);
-            }
-            while now2 < now1 {
-                last_stage2 = timer2.next().unwrap();
-                now2 = now2 + last_sleep_duration(&timer2);
-                timer2.clock.debug_add_now(now2);
-            }
-            assert_eq!(now1, now2);
-            assert_eq!(last_stage1.round, last_stage2.round);
-            assert_eq!(last_stage1.stage, last_stage2.stage);
-            assert_eq!(last_stage1.master, last_stage2.master);
-        }
+        assert_eq!(stage.round, 102538497203);
+        assert_eq!(stage.stage, Stage::Stage1);
+        assert_eq!(stage.master, ids[1]);
     }
 }
 

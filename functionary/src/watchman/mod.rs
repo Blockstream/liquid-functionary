@@ -356,7 +356,7 @@ impl Watchman {
         let descriptors = config.consensus.cpes.iter().map(|e| {
             (e.start as BlockHeight, config.typed_watchman_descriptor(&e.wm_descriptor).into())
         }).collect::<Vec<_>>();
-        log!(Info, "Updating consensus tracker with descriptors from config: {:?}", descriptors);
+        descriptors.iter().for_each(|d| log!(Info, "Updating consensus tracker with descriptor from config: {:?}", d));
         blockchain_manager.update_known_descriptors(descriptors);
 
         // Regression 2021-03-30: check that, after loading from disk, the public key
@@ -887,8 +887,12 @@ impl rotator::Rotator for Watchman {
             log!(Error, "failed to update peer list: {}", e);
         }
 
-        // Use legacy ordering as long as the legacy wm descriptor is active.
-        let use_legacy_ordering = !self.blockchain_manager.consensus().wm_transition_made();
+        // Use legacy ordering as long as the legacy wm descriptor is active (and legacy ordering
+        // allowed).
+        let use_legacy_ordering = match self.config.node.allow_pre_dynafed_ordering {
+            Some(true) => !self.blockchain_manager.consensus().wm_transition_made(),
+            _ => false,
+        };
         log!(Debug, "use_legacy_ordering: {}", use_legacy_ordering);
 
         update_fn(::dynafed::UpdateNotif {
@@ -953,7 +957,7 @@ impl rotator::Rotator for Watchman {
         }
 
         if let Err(e) = self.update_hsm() {
-            log!(Error, "error updating HSM with new chain data: {}", e);
+            slog!(HsmUpdateFailed, error: e.to_string());
             self.state = State::Error(e);
             return;
         }
@@ -1134,6 +1138,10 @@ impl rotator::Rotator for Watchman {
                     self.state = State::Error(Error::SyncFailed(e));
                     return;
                 }
+                if let Err(e) = self.update_hsm() {
+                    slog!(HsmUpdateFailed, error: e.to_string());
+                    return;
+                }
 
                 x
             },
@@ -1186,7 +1194,7 @@ impl rotator::Rotator for Watchman {
             slog!(RpcSyncFailed, error: e.to_string());
         }
         if let Err(e) = self.update_hsm() {
-            log!(Error, "error updating HSM with new chain data: {}", e);
+            slog!(HsmUpdateFailed, error: e.to_string());
         }
 
         // Check for failed pegins to sweep
@@ -1198,6 +1206,18 @@ impl rotator::Rotator for Watchman {
             self.blockchain_manager.side_height(),
             &self.bitcoind,
         );
+    }
+
+    fn round_alternate_stage3(&mut self, _: RoundStage) {
+        slog!(WatchmanStartAlternateThirdStage);
+        // Regardless of the outcome of the round,
+        // do a sync to have less work next round.
+        if let Err(e) = self.blockchain_manager.update_from_rpc(&self.bitcoind, &self.sidechaind) {
+            slog!(RpcSyncFailed, error: e.to_string());
+        }
+        if let Err(e) = self.update_hsm() {
+            slog!(HsmUpdateFailed, error: e.to_string());
+        }
     }
 
     // React to a network message

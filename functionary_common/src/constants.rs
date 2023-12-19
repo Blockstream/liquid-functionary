@@ -115,6 +115,16 @@ include!(concat!(env!("OUT_DIR"), "/build_constants.rs"));
 #[cfg_attr(feature = "serde", derive(Deserialize, Serialize))]
 #[cfg_attr(feature = "serde", serde(default))]
 pub struct Constants {
+    /// Minimal Per Mille of the current funds to be swept
+    /// It is set to 10 (1%)
+    pub min_sweep_permille: u64,
+    /// Minimum absolute value to sweep to avoid utxos that are too small
+    /// It is set to 1 BTC
+    pub min_sweep_value_sats: u64,
+    /// In order to consolidate, certain UTXOs won't be swept unless they reach a
+    /// critical "near-expiry" threshold.
+    /// It is 2 days worth of Bitcoin blocks.
+    pub critical_expiry_threshold: u64,
     /// The number of blocks before CSV expiry an output is considered "near-expiry".
     /// It is 5 days worth of Bitcoin blocks.
     pub near_expiry_threshold: u64,
@@ -123,6 +133,9 @@ pub struct Constants {
 impl Default for Constants {
     fn default() -> Self {
         Constants {
+            min_sweep_permille: 10,
+            min_sweep_value_sats: 100_000_000,
+            critical_expiry_threshold: 720,
             near_expiry_threshold: 720
         }
     }

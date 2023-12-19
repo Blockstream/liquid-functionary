@@ -45,7 +45,7 @@ fn serialize_hex_opt<S: serde::Serializer>(
 }
 
 /// Record a utxo we now control
-#[derive(Copy, Clone, PartialEq, Eq, Debug, Serialize)]
+#[derive(Copy, Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct RecordUtxo<'a> {
     /// The outpoint of the controlled UTXO
     pub utxo: bitcoin::OutPoint,
@@ -60,7 +60,7 @@ pub struct RecordUtxo<'a> {
 
 /// Finalized the processing of a pegout on the mainchain; forget
 /// about the corresponding request
-#[derive(Copy, Clone, PartialEq, Eq, Debug, Serialize)]
+#[derive(Copy, Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct ForgetUtxo {
     /// The UTXO being spent
     pub utxo: bitcoin::OutPoint,

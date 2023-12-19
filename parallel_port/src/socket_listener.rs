@@ -82,7 +82,7 @@ impl SocketListener {
                         Debug,
                         "Opening socket {} connection {} ({} open connections on socket)",
                         self.socket_number,
-                       connection_id,
+                        connection_id,
                         (*socket_connections_guard).len() + 1,
                     );
 

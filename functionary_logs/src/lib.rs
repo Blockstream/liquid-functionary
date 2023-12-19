@@ -49,7 +49,8 @@ pub mod log_codes;
 
 use std::{fmt, io, sync, thread};
 use std::collections::HashMap;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
+use common::deserialize_duration_ms;
 
 use common::RoundStage;
 
@@ -415,21 +416,83 @@ pub trait Log: serde::Serialize + Sized {
     }
 }
 
+#[derive(Clone, Copy, Debug)]
+pub struct GenericContext {
+    /// Time that process was last initialized or booted
+    pub start_time: SystemTime,
+}
+
+impl Default for GenericContext {
+    fn default() -> Self {
+        Self{
+            start_time: SystemTime::now(),
+        }
+    }
+}
+
+fn serialize_duration_ms<S: serde::Serializer>(t: &Duration, s: S) -> Result<S::Ok, S::Error> {
+        serde::Serialize::serialize(&t.as_millis(), s)
+}
+
+/// A serialized [RoundStage] with the elapsed variable set.
+#[derive(Copy, Clone, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
+struct SerializedGenericContext {
+    /// Time in ms elapsed since process last initialized/booted
+    #[serde(rename = "elapsed_ms")]
+    #[serde(serialize_with = "serialize_duration_ms", deserialize_with = "deserialize_duration_ms")]
+    pub elapsed: Duration,
+}
+
+impl serde::Serialize for GenericContext {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let ret = SerializedGenericContext {
+            elapsed: self.start_time.elapsed().unwrap_or_default(),
+        };
+        serde::Serialize::serialize(&ret, serializer)
+    }
+}
+
+#[derive(Clone, Copy, Debug, Serialize)]
+#[serde(untagged)]
+pub enum LoggingContext {
+    Staged(RoundStage),
+    Generic(GenericContext),
+}
+
+impl Default for LoggingContext {
+    fn default() -> Self {
+        Self::Staged(Default::default())
+    }
+}
 
 lazy_static! {
-    static ref GLOBAL_ROUND_STAGE: sync::Mutex<RoundStage> = sync::Mutex::new(
+    static ref GLOBAL_LOGGING_CONTEXT: sync::Mutex<LoggingContext> = sync::Mutex::new(
         Default::default()
     );
 }
 
+/// Set the global context to some new value
+pub fn set_logging_context(new_context: LoggingContext) {
+    let mut lock = GLOBAL_LOGGING_CONTEXT.lock().unwrap();
+    *lock = new_context;
+}
+
+pub fn get_logging_context() -> LoggingContext {
+    *GLOBAL_LOGGING_CONTEXT.lock().unwrap()
+}
+
 /// Set the global roundstage to some new value
 pub fn set_round_stage(new_stage: RoundStage) {
-    let mut lock = GLOBAL_ROUND_STAGE.lock().unwrap();
-    *lock = new_stage;
+    set_logging_context(LoggingContext::Staged(new_stage));
 }
 
 pub fn get_round_stage() -> RoundStage {
-    *GLOBAL_ROUND_STAGE.lock().unwrap()
+    let logging_context = get_logging_context();
+    if let LoggingContext::Staged(c) = logging_context {
+        return c;
+    } else {
+        panic!("round stage: unexpected context: {:?}", logging_context);
+    }
 }
 
 fn serialize_display<S: serde::Serializer>(
@@ -455,12 +518,12 @@ macro_rules! filename {
 #[macro_export]
 macro_rules! slog {
     ($struct:ident) => {{
-        $crate::Log::log(&$crate::$struct { }, $crate::filename!(), line!(), stringify!($struct), &$crate::get_round_stage())
+        $crate::Log::log(&$crate::$struct { }, $crate::filename!(), line!(), stringify!($struct), &$crate::get_logging_context())
     }};
     ($struct:ident, $( $args:tt )*) => {{
         $crate::Log::log(&$crate::$struct {
             $( $args )*
-        }, $crate::filename!(), line!(), stringify!($struct), &$crate::get_round_stage())
+        }, $crate::filename!(), line!(), stringify!($struct), &$crate::get_logging_context())
     }};
 }
 
@@ -472,7 +535,7 @@ macro_rules! slog_fatal {
     ($struct:ident, $( $args:tt )*) => {{
         $crate::Log::log_fatal(&$crate::$struct {
             $( $args )*
-        }, $crate::filename!(), line!(), stringify!($struct), &$crate::get_round_stage())
+        }, $crate::filename!(), line!(), stringify!($struct), &$crate::get_logging_context())
     }}
 }
 

@@ -407,8 +407,8 @@ impl Router {
         io::Write::write_all(&mut seed_engine, &rcvr[..]).unwrap();
 
         let mut id_set: Vec<peer::Id> = self.peers.ids()
-            .filter(|&id| id != sender && id != rcvr
-        ).collect();
+            .filter(|&id| id != sender && id != rcvr && self.peers.in_consensus(id))
+            .collect();
         id_set.sort_by_cached_key(|id| {
             let mut eng = seed_engine.clone();
             io::Write::write_all(&mut eng, &id[..]).unwrap();

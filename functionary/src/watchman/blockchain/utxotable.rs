@@ -72,7 +72,7 @@ use bitcoin::secp256k1::{rand, PublicKey};
 use elements;
 
 use common::BlockHeight;
-use common::constants::{CONSTANTS, MAX_PROPOSAL_TOTAL_HSM_PAYLOAD};
+use common::constants::{CONSTANTS, MAX_PROPOSAL_TOTAL_HSM_PAYLOAD, MAXIMUM_REQUIRED_INPUTS};
 use descriptor::{LiquidDescriptor, TweakableDescriptor};
 use common::hsm;
 use logs::ProposalError;
@@ -961,7 +961,8 @@ impl UtxoTable {
         economical_amount: u64,
         current_height: BlockHeight,
         available_signers: &'utxo HashSet<peer::Id>,
-    ) {
+    ) -> bool {
+        let mut really_critical = false;
         for utxo in self.spendable_utxos(Some(available_signers)) {
             if utxo.value < economical_amount {
                 slog!(IgnoreUneconomicalUtxo, outpoint: utxo.outpoint, value: utxo.value);
@@ -978,10 +979,15 @@ impl UtxoTable {
 
                     if let Err(e) = proposal.add_input(fee_pool, utxo) {
                         slog!(NotSpendingUtxo, outpoint: utxo.outpoint, error: e.to_string());
+                    } else {
+                        if utxo.height + expiry < current_height + CONSTANTS.critical_expiry_threshold {
+                            really_critical = true;
+                        }
                     }
                 }
             }
         }
+        really_critical
     }
 
     /// Helper to add nearly-expired (or actually expired) inputs
@@ -995,10 +1001,11 @@ impl UtxoTable {
         current_height: BlockHeight,
         available_signers: &'utxo HashSet<peer::Id>,
         explicit_utxos_to_sweep: &'utxo Vec<bitcoin::OutPoint>,
-    ) {
+    ) -> bool {
         if !explicit_utxos_to_sweep.is_empty() {
             log!(Info, "Check if following UTXOs are available to be explicitly swept: {:?}", explicit_utxos_to_sweep);
         }
+        let mut explicit_utxos = false;
         // This loop is the outer loop so that if there are no explicit sweeps this method will exit early.
         for explicitly_selected_utxo in explicit_utxos_to_sweep.iter() {
             for utxo in self.spendable_utxos(Some(available_signers)) {
@@ -1009,10 +1016,13 @@ impl UtxoTable {
                     );
                     if let Err(e) = proposal.add_input(fee_pool, utxo) {
                         slog!(NotSpendingUtxo, outpoint: utxo.outpoint, error: e.to_string());
+                    } else {
+                        explicit_utxos = true;
                     }
                 }
             }
         }
+        explicit_utxos
     }
 
     /// Helper to add failed pegin UTXOs to a transaction proposal.
@@ -1068,19 +1078,28 @@ impl UtxoTable {
         );
 
         // 1. Add inputs that are near expiry
-        self.add_critical_inputs(
+        let really_critical_added = self.add_critical_inputs(
             &mut proposal, fee_pool, input_exclude, min_amount, bitcoin_tip, available_signers,
         );
 
         // Check if any of the explicitly selected UTXOs are spendable and if they are include them in the proposal
-        self.check_and_add_explict_utxos_to_sweep(
+        let explicit_added = self.check_and_add_explict_utxos_to_sweep(
             &mut proposal, fee_pool, input_exclude, bitcoin_tip, available_signers, explicit_utxos_to_sweep
         );
 
         // If we added any, make sure this transaction is completed
         // even if it doesn't wind up processing any pegouts.
         if proposal.n_inputs() > 0 {
-            fund_even_without_pegouts = true;
+            if really_critical_added || explicit_added || proposal.input_value() >= CONSTANTS.min_sweep_value_sats || proposal.n_inputs() >= MAXIMUM_REQUIRED_INPUTS {
+                fund_even_without_pegouts = true;
+            } else {
+                let total_funds = self.spendable_utxos(Some(available_signers)).map(|u| u.value).sum::<u64>();
+                if (proposal.input_value() * 1000) > (total_funds * CONSTANTS.min_sweep_permille) {
+                    fund_even_without_pegouts = true;
+                } else {
+                    slog!(NotSweepingUtxos, value: proposal.input_value(), num_utxos: proposal.n_inputs() as u64, min_sweep_value_sats: CONSTANTS.min_sweep_value_sats, min_sweep_per_mille: CONSTANTS.min_sweep_permille, total_funds);
+                }
+            }
         }
 
         // Randomly order remaining inputs but prioritize UTXOs of old federations.
@@ -1199,6 +1218,9 @@ impl UtxoTable {
         // The transaction is complete except for change/fee adjustment.
         // Check that it makes any sense.
         if proposal.n_pegouts() == 0 && !fund_even_without_pegouts {
+            // clear the proposal before trying the failed pegins
+            proposal = transaction::Proposal::new(change_spk);
+
             // Check if there are any failed pegin's marked for sweeping
             self.check_and_add_failed_pegin_reclamations(
                 &mut proposal,

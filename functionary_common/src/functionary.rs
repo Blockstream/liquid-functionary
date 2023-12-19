@@ -15,11 +15,16 @@
 //along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 use std::{fmt, ops, str};
+use std::cmp::Ordering;
+use std::convert::TryFrom;
+use std::fmt::{Display, Formatter};
 use std::time::{Duration, SystemTime};
 
 use bitcoin::hashes::{sha256d, Hash};
 use bitcoin::hashes::hex::{self, FromHex};
 use bitcoin::secp256k1::PublicKey;
+#[cfg(feature = "serde")]
+use serde::Deserialize;
 
 /// A six-byte peer network ID based on the hash of the signing pubkey.
 #[derive(Copy, Clone, PartialOrd, Ord, PartialEq, Eq, Default, Hash)]
@@ -139,9 +144,70 @@ fn serialize_duration_ms<S: serde::Serializer>(t: &Duration, s: S) -> Result<S::
 }
 
 #[cfg(feature = "serde")]
-fn deserialize_duration_ms<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Duration, D::Error> {
+pub fn deserialize_duration_ms<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Duration, D::Error> {
     let ms: u64 = serde::Deserialize::deserialize(d)?;
     Ok(Duration::from_millis(ms))
+}
+
+#[cfg(feature = "serde")]
+pub fn deserialize_option_duration_ms<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<Duration>, D::Error> {
+    let ms: Option<u64> = serde::Deserialize::deserialize(d)?;
+    Ok(ms.map(|ms| Duration::from_millis(ms)))
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Stage {
+    Stage1,
+    Stage2,
+    Stage3,
+    /// Catchup sync
+    Stage3b,
+}
+
+impl PartialOrd for Stage {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        (i32::from(*self)).abs().partial_cmp(&(i32::from(*other)).abs())
+    }
+}
+
+impl From<Stage> for i32 {
+    fn from(stage: Stage) -> Self {
+        match stage {
+            Stage::Stage1 => 1,
+            Stage::Stage2 => 2,
+            Stage::Stage3 => 3,
+            Stage::Stage3b => -3,
+        }
+    }
+}
+
+impl TryFrom<i32> for Stage {
+    type Error = String;
+
+    fn try_from(stage: i32) -> Result<Self, Self::Error> {
+        match stage {
+            1 => Ok(Stage::Stage1),
+            2 => Ok(Stage::Stage2),
+            3 => Ok(Stage::Stage3),
+            -3 => Ok(Stage::Stage3b),
+            _=> Err(format!("{} is not a valid stage number", stage))
+        }
+    }
+}
+
+impl Stage {
+    /// Returns the index of the Stage that can be used to access the Duration array. This is also
+    /// useful for comparing stages because it exploits the fact that the absolute value of
+    /// Stage3 and Stage3b are equivalent.
+    pub fn as_duration_index(&self) -> usize {
+        (i32::from(*self).abs() - 1) as usize
+    }
+}
+
+impl Display for Stage {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", i32::from(*self))
+    }
 }
 
 /// Round stage, which encodes a current round number, current master peer and
@@ -155,7 +221,7 @@ pub struct RoundStage {
     /// Current round number
     pub round: u64,
     /// Current stage number within a round (0-indexed)
-    pub stage: usize,
+    pub stage: Stage,
     /// Current master
     pub master: PeerId,
 }
@@ -166,7 +232,7 @@ impl Default for RoundStage {
             start_time: SystemTime::now(),
             duration: Default::default(),
             round: 0,
-            stage: 0,
+            stage: Stage::Stage1,
             master: Default::default(),
         }
     }
@@ -174,7 +240,7 @@ impl Default for RoundStage {
 
 impl fmt::Display for RoundStage {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        let elapsed = &self.start_time.elapsed().expect("time in the past").as_millis();
+        let elapsed = &self.start_time.elapsed().unwrap_or_default().as_millis();
         write!(f, "{}.{} {}/{} ms", self.round, self.stage, elapsed, self.duration.as_millis())
     }
 }
@@ -183,10 +249,10 @@ impl fmt::Display for RoundStage {
 impl serde::Serialize for RoundStage {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         let ret = SerializedRoundStage {
-            elapsed: self.start_time.elapsed().expect("time in the past"),
+            elapsed: self.start_time.elapsed().unwrap_or_default(),
             duration: self.duration,
             round: self.round,
-            stage: self.stage,
+            stage: i32::from(self.stage),
             master: self.master,
         };
         serde::Serialize::serialize(&ret, serializer)
@@ -202,7 +268,7 @@ impl RoundStage {
                 + Duration::from_secs(7900 * 3600 * 24),
             duration: Duration::from_millis(25000),
             round: 123456789,
-            stage: 2,
+            stage: Stage::Stage3,
             master: PeerId::from(&b"andrew"[..]),
         }
     }
@@ -231,8 +297,8 @@ pub struct SerializedRoundStage {
     pub duration: Duration,
     /// Current round number
     pub round: u64,
-    /// Current stage number within a round (0-indexed)
-    pub stage: usize,
+    /// Current stage number within a round
+    pub stage: i32,
     /// Current master
     pub master: PeerId,
 }

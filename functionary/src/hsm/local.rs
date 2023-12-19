@@ -20,7 +20,7 @@
 //! Implementation of a SecurityModule which takes a key from a configuration file
 //!
 
-use std::fs;
+use std::{fs, time};
 use std::cell::RefCell;
 use std::path::{Path, PathBuf};
 use std::os::unix::net::UnixStream;
@@ -220,9 +220,11 @@ impl SecurityModule for LocalBlocksigner {
     fn get_watchman_state(&self) -> Result<WatchmanState, Error> { unimplemented!() }
 
     fn initialize_hsm(&self, _: InitHSM, _: u64) -> Result<Vec<u8>, Error> { unimplemented!() }
+    fn initialize_hsm_from(&self, _: InitHSM, _: u64, _: Address) -> Result<Vec<u8>, Error> { unimplemented!() }
     fn update_tool_send(&self, _: &[u8]) -> Result<UnixStream, Error> { unimplemented!() }
     fn update_tool_recv(&self, _sock: &mut UnixStream) -> Result<(Command, Vec<u8>), Error> { unimplemented!() }
     fn get_signing_key(&self, _return_address: Address) -> Result<Vec<u8>, Error> { unimplemented!() }
+    fn get_rtc(&self, _return_address: Address) -> Result<u64, Error> { unimplemented!() }
 }
 
 impl SecurityModule for LocalWatchman {
@@ -344,11 +346,18 @@ impl SecurityModule for LocalWatchman {
     }
 
     fn initialize_hsm(&self, _: InitHSM, _: u64) -> Result<Vec<u8>, Error> { unimplemented!() }
+    fn initialize_hsm_from(&self, _: InitHSM, _: u64, _: Address) -> Result<Vec<u8>, Error> { unimplemented!() }
     fn update_tool_send(&self, _: &[u8]) -> Result<UnixStream, Error> { unimplemented!() }
     fn update_tool_recv(&self, _sock: &mut UnixStream) -> Result<(Command, Vec<u8>), Error> { unimplemented!() }
 
     fn get_signing_key(&self, _return_address: Address) -> Result<Vec<u8>, Error> {
         unimplemented!()
+    }
+
+    fn get_rtc(&self, _return_address: Address) -> Result<u64, Error> {
+        let now = time::SystemTime::now().duration_since(time::UNIX_EPOCH).expect("system time");
+        let timestamp_millis: u64 = now.as_secs() * 1000 + (now.subsec_nanos() as u64) / 1000000;
+        Ok(timestamp_millis)
     }
 }
 

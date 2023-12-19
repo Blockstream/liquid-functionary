@@ -96,6 +96,11 @@ pub trait SecurityModule {
         &self, config: config::InitHSM, timestamp_millis: u64,
     ) -> Result<Vec<u8>, Error>;
 
+    /// Initialize HSM operations from a specific address
+    fn initialize_hsm_from(
+        &self, config: config::InitHSM, timestamp_millis: u64, return_address: hsm::Address,
+    ) -> Result<Vec<u8>, Error>;
+
     /// Ask the HSM to send back its signing key. The return address is used by parallel_port
     /// to route the response back to the caller.
     fn get_signing_key(&self, return_address: hsm::Address) -> Result<Vec<u8>, Error>;
@@ -106,5 +111,8 @@ pub trait SecurityModule {
 
     /// Wait for and return a response from the HSM
     fn update_tool_recv(&self, sock: &mut UnixStream) -> Result<(hsm::Command, Vec<u8>), Error>;
+
+    /// Ask the HSM to send back the RTC (in milliseconds) from SRAM chip
+    fn get_rtc(&self, return_address: hsm::Address) -> Result<u64, Error>;
 }
 

@@ -150,6 +150,7 @@ impl_log!("F-B502", Error, HsmRejectBlock<'a>, "hsm rejected block");
 impl_log!("F-B503", Error, DaemonRejectBlock<'a>, "daemon rejected block");
 impl_log!("F-B504", Error, PrecommitAtWrongTime, "precommit at wrong time");
 impl_log!("F-B505", Error, PrecommitWrongHash, "precommit to wrong block");
+impl_log!("F-B506", Warn, DuplicateBlock<'a>, "daemon reported block already in chain");
 
 impl_log!("F-D001", Error, PrematureProposal, "premature proposal");
 
@@ -221,6 +222,7 @@ impl_log!("F-W222", Error, FailedPeginCanBeClaimed, "pegin can be claimed");
 impl_log!("F-W223", Info, LoadedFailedPegin, "pegin loaded from config");
 impl_log!("F-W224", Info, ReclaimFailedPegin, "reclaim failed pegin utxo");
 impl_log!("F-W225", Info, FailedPeginReclamationInMempool, "failed pegin reclamation in mempool");
+impl_log!("F-W226", Info, NotSweepingUtxos, "not sweeping utxos");
 impl_log!("F-W298", Info, ValidateProposal<'a>, "validate tx proposal");
 impl_log!("F-W299", Info, CompleteProposal<'a>, "complete tx proposal");
 
@@ -231,6 +233,7 @@ impl_log!("F-W303", Warn, PegoutToFederation, "pegout to federation");
 
 impl_log!("F-W400", Info, WatchmanStartStage, "start stage");
 impl_log!("F-W400", Info, WatchmanProductiveRound, "start stage");
+impl_log!("F-W401", Warn, WatchmanStartAlternateThirdStage, "start alternate third stage");
 impl_log!("F-W410", Info, WatchmanRoundComplete<'a>, "round complete");
 impl_log!("F-W411", Info, WatchmanRoundSkipped, "round skipped");
 impl_log!("F-W412", Info, WatchmanRoundIdled, "round idled");
@@ -250,6 +253,7 @@ impl_log!("F-W600", Debug, HsmSendingHeader, "sending block header to HSM");
 impl_log!("F-W601", Debug, HsmAcceptedHeader, "HSM accepted new header");
 impl_log!("F-W602", Error, HsmRefusedHeader, "HSM refused header");
 impl_log!("F-W603", Error, HsmErrorOnHeader, "HSM errored while processing header header");
+impl_log!("F-W604", Error, HsmUpdateFailed, "update of HSM failed");
 
 impl_log!("F-W800", Warn, RpcSyncFailed, "RPC sync failed");
 impl_log!("F-W801", Warn, TxUnknownAfterBroadcast, "tx unknown after broadcast");

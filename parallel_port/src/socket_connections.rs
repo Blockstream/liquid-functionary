@@ -126,7 +126,7 @@ impl SocketConnections {
 
         let mut num_forwarded = 0;
         let mut tried = false;
-        let message_sequence_number = message.sequence_number.clone();
+        let message_sequence_number = message.sequence_number;
         for (position, connection) in self.connections.iter_mut().enumerate() {
             let connection_sequence_number = connection.sequence_number() as u8;
 

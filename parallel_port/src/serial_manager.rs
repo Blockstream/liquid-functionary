@@ -160,7 +160,7 @@ impl<'a> SerialPortManager<'a> {
             }
         }
 
-        write_buffer.extend(HSM_NETWORK_MAGIC.clone().as_bytes().iter());
+        write_buffer.extend(HSM_NETWORK_MAGIC.as_bytes().iter());
         write_buffer.extend(header_serialized.iter());
         write_buffer.extend(message.payload.iter());
 
@@ -267,7 +267,13 @@ fn ring_indicator_monitor(
                             let mut cmd = std::process::Command::new(script_run_command.as_str());
                             cmd.arg(script_path.as_str());
                             if let Err(e) = cmd.output() {
-                                log!(Error, "Failed to run command `{} {}`: {:?}", script_run_command, script_path, e);
+                                log!(
+                                    Error,
+                                    "Failed to run command `{} {}`: {:?}",
+                                    script_run_command,
+                                    script_path,
+                                    e
+                                );
                             }
                             ipset_updated = Instant::now();
                         } else {

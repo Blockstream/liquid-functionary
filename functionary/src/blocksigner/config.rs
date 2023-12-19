@@ -31,6 +31,7 @@ use common::PakList;
 use peer;
 use tweak;
 use common::rollouts::Rollouts;
+use common::deserialize_duration_ms;
 
 /// Local configuration (RPC connections, etc)
 #[derive(Clone, PartialEq, Eq, Debug, Deserialize)]
@@ -85,6 +86,13 @@ pub struct Node {
     pub communication_secret_key: SecretKey,
     /// How many peers must precommit to a block before we'll sign it
     pub precommit_threshold: usize,
+    /// Allow late-arriving peer messages to trigger re-attempt
+    /// block signing (in hopes of salvaging an otherwise doomed round).
+    /// Default: false
+    pub allow_final_stage_signing: Option<bool>,
+    /// Allow legacy pre-dynafed ordering in pre-dynafed conditions
+    /// Default: false
+    pub allow_pre_dynafed_ordering: Option<bool>,
 }
 
 /// Consensus parameter entry
@@ -133,15 +141,15 @@ pub struct Consensus {
     pub peers: Vec<peer::Peer>,
     /// Duration of stage 1 (in ms)
     #[serde(alias="stage1_ms")]
-    #[serde(deserialize_with = "config::deserialize_duration_ms")]
+    #[serde(deserialize_with = "deserialize_duration_ms")]
     pub stage1: Duration,
     /// Duration of stage 2 (in ms)
     #[serde(alias="stage2_ms")]
-    #[serde(deserialize_with = "config::deserialize_duration_ms")]
+    #[serde(deserialize_with = "deserialize_duration_ms")]
     pub stage2: Duration,
     /// Duration of stage 3 (in ms)
     #[serde(alias="stage3_ms")]
-    #[serde(deserialize_with = "config::deserialize_duration_ms")]
+    #[serde(deserialize_with = "deserialize_duration_ms")]
     pub stage3: Duration,
     /// Vector of dynamic-federation transitions
     #[serde(default)]

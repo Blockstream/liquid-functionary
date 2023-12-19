@@ -1,6 +1,6 @@
 [package]
 name = "parallel_port"
-version = "0.1.0"
+version = "2.3.0"
 authors = ["Blockstream <support@blockstream.com>"]
 description = "Rust port of the HSM parallel port multiplexer"
 edition = "2018"
@@ -16,9 +16,12 @@ bitcoin = { version = "0.28.1" }
 byteorder = "0.3"
 clap = "2.33.0"
 nix = "0.14.1"
+serde = "1.0"
+serde_derive = "1.0"
 serialport = "3"
 thiserror = "1.0.30"
 time = "0.1"
+toml = "0.5"
 
 functionary_common = { path = "../functionary_common/" }
 functionary_logs = { path = "../functionary_logs/" }

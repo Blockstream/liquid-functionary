@@ -21,7 +21,6 @@
 
 use std::collections::HashMap;
 use std::str::FromStr;
-use std::time::Duration;
 
 use bitcoin::PrivateKey;
 use bitcoin::secp256k1::{SecretKey, PublicKey};
@@ -108,14 +107,6 @@ pub fn deserialize_ecies_blob<'de, D: Deserializer<'de>>(d: D)
         Ok(data) => Ok(data),
         Err(e) => Err(D::Error::custom(e)),
     }
-}
-
-/// Helper function to deserialize durations encoded as milliseconds
-pub fn deserialize_duration_ms<'de, D: Deserializer<'de>>(d: D)
-    -> Result<Duration, D::Error>
-{
-    let ms = u64::deserialize(d)?;
-    Ok(Duration::from_millis(ms))
 }
 
 /// Helper function to deserialize hex-encoded bitcoin::Transactions

@@ -82,23 +82,24 @@ pub struct WaitForStage {
     /// Round number of the next stage
     pub next_round: u64,
     /// Stage number of the next stage
-    pub next_stage: usize,
+    pub next_stage: i32,
     /// Amount of time we will wait, in milliseconds
     pub delay_ms: u64,
 }
 
 /// Overran the start of the next stage
-#[derive(Copy, Clone, PartialEq, Eq, Debug, Serialize)]
+#[derive(Copy, Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct StageOverrun {
     /// Round number of the overrun stage
     pub overrun_round: u64,
     /// Stage number of the overrun stage
-    pub overrun_stage: usize,
+    pub overrun_stage: i32,
     /// Amount of time we overran the stage start, in milliseconds
     pub overrun_ms: u64,
-    /// Round number of the next stage (which we will start from
-    /// the beginning, i.e. at stage number 0)
+    /// Round number of the next stage that will run after this overrun
     pub next_round: u64,
+    /// The next stage that will run after this overrun
+    pub next_stage: i32,
 }
 
 /// Underran the start of the next stage (in fact, the start
@@ -116,7 +117,7 @@ pub struct StageUnderrun {
     /// Round number of the expected next stage
     pub underrun_round: u64,
     /// Stage number of the expected next stage
-    pub underrun_stage: usize,
+    pub underrun_stage: i32,
     /// Amount of time we before the start of that stage we observed
     /// the clock to be, in milliseconds
     pub underrun_ms: u64,

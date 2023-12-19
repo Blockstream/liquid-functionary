@@ -27,7 +27,7 @@ pub struct RpcRequest<'a> {
     /// the method
     pub method: &'a str,
     /// the arguments
-    pub arguments: &'a [String],
+    pub arguments: &'a [&'a str],
 }
 
 /// an RPC response

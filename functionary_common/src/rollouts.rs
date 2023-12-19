@@ -90,7 +90,7 @@ pub enum Broadcast {
 
 impl Default for Broadcast {
     fn default() -> Self {
-        Broadcast::Phase1
+        Broadcast::Phase3
     }
 }
 
@@ -125,7 +125,7 @@ pub enum StatusAckElim {
 
 impl Default for StatusAckElim {
     fn default() -> Self {
-        StatusAckElim::Phase1
+        StatusAckElim::Phase3
     }
 }
 

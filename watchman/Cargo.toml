@@ -5,7 +5,7 @@
 
 [package]
 name = "watchman"
-version = "2.2.0"
+version = "2.3.0"
 authors = ["Blockstream <support@blockstream.com>"]
 description = "Liquid/Elements Watchman"
 
@@ -17,7 +17,7 @@ path = "src/main.rs"
 toml = "0.5"
 
 [dependencies.functionary_logs]
-version = "2.2.0"
+version = "2.3.0"
 path = "../functionary_logs/"
 
 [dependencies.functionary]

@@ -89,7 +89,7 @@ impl SerialListener {
                         break;
                     }
                 }
-                Err(Error::IoError(e)) if e.kind() == io::ErrorKind::TimedOut => {
+                Err(Error::Io(e)) if e.kind() == io::ErrorKind::TimedOut => {
                     if self.shutdown_flag.load(Ordering::SeqCst) {
                         log!(Warn, "Shutting down serial port listener");
                         break;

@@ -186,6 +186,16 @@ pub struct DaemonRejectBlock<'a> {
     /// Stringified version of the HSM error
     pub error: String,
 }
+///
+/// The daemon (through testproposedblock RPC) reported a block
+/// already exists (RPC_VERIFY_ALREADY_IN_CHAIN)
+#[derive(Clone, PartialEq, Eq, Debug, Serialize)]
+pub struct DuplicateBlock<'a> {
+    /// The block that was rejected because of duplication
+    pub header: &'a elements::BlockHeader,
+    /// Accompanying explanatory text from RPC
+    pub error: String,
+}
 
 /// Received a precommit at the wrong time (likely, after having already
 /// received a precommit or a signature), which we are rejecting for that

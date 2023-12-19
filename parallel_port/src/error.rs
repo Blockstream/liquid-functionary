@@ -24,13 +24,13 @@ pub enum Error {
     #[error("Connection reset by peer")]
     ConnectionResetByPeer,
     #[error(transparent)]
-    IoError(#[from] std::io::Error),
+    Io(#[from] std::io::Error),
     #[error(transparent)]
-    ByteOrderError(#[from] byteorder::Error),
+    ByteOrder(#[from] byteorder::Error),
     #[error(transparent)]
-    HsmError(#[from] HsmError),
+    Hsm(#[from] HsmError),
     #[error(transparent)]
-    SerialPortError(#[from] serialport::Error),
+    SerialPort(#[from] serialport::Error),
     #[error(transparent)]
     Other(#[from] anyhow::Error),
 }

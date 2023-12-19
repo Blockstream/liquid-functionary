@@ -14,8 +14,8 @@
 //You should have received a copy of the GNU Affero General Public License
 //along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-use crate::error::Error;
 use crate::constants::{HSM_MAX_MESSAGE_SIZE, HSM_NETWORK_MAGIC};
+use crate::error::Error;
 use bitcoin::hashes::hex::ToHex;
 use std::io;
 use std::io::{Cursor, Read};
@@ -79,8 +79,8 @@ where
                         self.cursor -= position;
                         return Ok(Some(message));
                     }
-                    Err(Error::IoError(err)) if err.kind() == io::ErrorKind::UnexpectedEof => (),
-                    Err(Error::ByteOrderError(byteorder::Error::UnexpectedEOF)) => (),
+                    Err(Error::Io(err)) if err.kind() == io::ErrorKind::UnexpectedEof => (),
+                    Err(Error::ByteOrder(byteorder::Error::UnexpectedEOF)) => (),
                     Err(e) => {
                         return Err(e);
                     }

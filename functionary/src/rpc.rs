@@ -19,7 +19,7 @@
 //!
 
 use std::collections::HashSet;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use std::cmp;
 
 use bitcoin;
@@ -29,6 +29,7 @@ use bitcoin::hashes::{sha256, sha256d};
 use bitcoin::secp256k1::PublicKey;
 use serde_json;
 use serde::Serialize;
+use serde_json::value::RawValue;
 
 use common::BlockHeight;
 use common::PakList;
@@ -36,6 +37,8 @@ use utils::InChain;
 
 /// RPC error code from Core.
 pub const RPC_VERIFY_ALREADY_IN_CHAIN: i32 = -27;
+
+const RPC_TIMEOUT: Duration = Duration::from_secs(15 * 60);
 
 /// Get information on a Bitcoin tx.
 ///
@@ -197,7 +200,7 @@ pub trait Rpc {
                     InChain::WrongDepth(resp.confirmations as BlockHeight)
                 }
             }
-            Err(e @ jsonrpc::Error::Hyper(_)) => InChain::RpcError(e),
+            Err(e @ jsonrpc::Error::Transport(_)) => InChain::RpcError(e),
             Err(_) => InChain::NotFound,
         }
     }
@@ -368,7 +371,7 @@ pub trait BitcoinRpc: Rpc {
         }
         match self.jsonrpc_query::<Response>("getblockheader", &[block_hash.to_string().into()]) {
             Ok(resp) => Ok(Some(resp.height)),
-            Err(e @ jsonrpc::Error::Hyper(_)) => Err(e),
+            Err(e @ jsonrpc::Error::Transport(_)) => Err(e),
             Err(_) => Ok(None),
         }
     }
@@ -601,7 +604,7 @@ pub trait ElementsRpc: Rpc {
         }
         match self.jsonrpc_query::<Response>("getblockheader", &[block_hash.to_string().into()]) {
             Ok(resp) => Ok(Some(resp.height)),
-            Err(e @ jsonrpc::Error::Hyper(_)) => Err(e),
+            Err(e @ jsonrpc::Error::Transport(_)) => Err(e),
             Err(_) => Ok(None),
         }
     }
@@ -618,7 +621,7 @@ pub trait ElementsRpc: Rpc {
         }
         match self.jsonrpc_query::<Response>("getblockheader", &[block.to_string().into()]) {
             Ok(resp) => Ok(Some((resp.height, resp.confirmations))),
-            Err(e @ jsonrpc::Error::Hyper(_)) => Err(e),
+            Err(e @ jsonrpc::Error::Transport(_)) => Err(e),
             Err(_) => Ok(None)
         }
     }
@@ -634,7 +637,7 @@ pub trait ElementsRpc: Rpc {
 fn is_warming_up(client: &jsonrpc::client::Client, endpoint_name: &str) -> Result<bool, jsonrpc::Error> {
     const RPC_IN_WARMUP: i32 = -28;
     let request = client.build_request("getblockchaininfo", &[]);
-    match client.send_request(&request) {
+    match client.send_request(request) {
         Ok(response) => {
             match response.error {
                 Some(e) => {
@@ -674,9 +677,17 @@ pub struct Bitcoin {
 impl Bitcoin {
     /// Create a new Bitcoin Core client.
     pub fn new(url: String, user: Option<String>, pass: Option<String>) -> Bitcoin {
+        let mut client_builder = jsonrpc::simple_http::Builder::new()
+            .timeout(RPC_TIMEOUT)
+            .url(url.as_str())
+            .expect("simple_http builder");
+        if let Some(u) = user.clone() {
+            client_builder = client_builder.auth(u, pass.clone());
+        }
+        let client = client_builder.build();
         Bitcoin {
             params: (url.clone(), user.clone(), pass.clone()),
-            client: jsonrpc::client::Client::new(url, user, pass),
+            client: jsonrpc::Client::with_transport(client),
         }
     }
 }
@@ -688,16 +699,17 @@ impl Rpc for Bitcoin {
         query: &str,
         args: &[jsonrpc::serde_json::Value],
     ) -> Result<T, jsonrpc::Error> {
-        let args_str: Vec<String> = args.iter().map(|a| a.to_string()).collect();
-        slog!(RpcRequest, daemon: "bitcoin", method: query, arguments: &args_str[..]);
-        let request = self.client.build_request(query, args);
+        let args_raw: Vec<Box<RawValue>> = args.iter().map(|a| jsonrpc::arg(a)).collect();
+        slog!(RpcRequest, daemon: "bitcoin", method: query, arguments: &args_raw.iter().map(|a| a.get()).collect::<Vec<_>>());
+        let request = self.client.build_request(query, &args_raw);
         let start_time = Instant::now();
-        let response = self.client.send_request(&request)?;
+        let result = self.client.send_request(request);
+        let response = result?;
         let duration_ns = start_time.elapsed().as_nanos();
         if let Some(ref error) = response.error {
             slog!(RpcResponse, daemon: "bitcoin", method: query, result: format!("error: {:?}", error).as_str(), duration_ns);
         } else if let Some(ref result) = response.result {
-            let size = result.as_str().unwrap_or_default().len();
+            let size = result.get().len();
             slog!(RpcResponse, daemon: "bitcoin", method: query, duration_ns,
                 result: format!("{} bytes", size).as_str(),
             );
@@ -705,7 +717,7 @@ impl Rpc for Bitcoin {
         } else {
             slog!(RpcResponse, daemon: "bitcoin", method: query, result: "null", duration_ns);
         }
-        response.into_result::<T>()
+        response.result::<T>()
     }
 
     fn is_warming_up(&self, endpoint_name: &str) -> Result<bool, jsonrpc::Error> {
@@ -719,7 +731,8 @@ impl Clone for Bitcoin {
         let (url, user, pass) = self.params.clone();
         Bitcoin {
             params: self.params.clone(),
-            client: jsonrpc::client::Client::new(url, user, pass),
+            client: jsonrpc::client::Client::simple_http(url.as_str(), user, pass)
+                .expect("Problem creating Bitcoin client"),
         }
     }
 }
@@ -735,9 +748,17 @@ pub struct Elements {
 impl Elements {
     /// Create a new Elements Core client.
     pub fn new(url: String, user: Option<String>, pass: Option<String>) -> Elements {
+        let mut client_builder = jsonrpc::simple_http::Builder::new()
+            .timeout(RPC_TIMEOUT)
+            .url(url.as_str())
+            .expect("simple_http builder");
+        if let Some(u) = user.clone() {
+            client_builder = client_builder.auth(u, pass.clone());
+        }
+        let client = client_builder.build();
         Elements {
             params: (url.clone(), user.clone(), pass.clone()),
-            client: jsonrpc::client::Client::new(url, user, pass),
+            client: jsonrpc::client::Client::with_transport(client),
         }
     }
 }
@@ -749,16 +770,16 @@ impl Rpc for Elements {
         query: &str,
         args: &[jsonrpc::serde_json::Value],
     ) -> Result<T, jsonrpc::Error> {
-        let args_str: Vec<String> = args.iter().map(|a| a.to_string()).collect();
-        slog!(RpcRequest, daemon: "elements", method: query, arguments: &args_str[..]);
-        let request = self.client.build_request(query, args);
+        let args_raw: Vec<Box<RawValue>> = args.iter().map(|a| jsonrpc::arg(a)).collect();
+        slog!(RpcRequest, daemon: "elements", method: query, arguments: &args_raw.iter().map(|a| a.get()).collect::<Vec<_>>());
+        let request = self.client.build_request(query, &args_raw);
         let start_time = Instant::now();
-        let response = self.client.send_request(&request)?;
+        let response = self.client.send_request(request)?;
         let duration_ns = start_time.elapsed().as_nanos();
         if let Some(ref error) = response.error {
             slog!(RpcResponse, daemon: "elements", method: query, result: format!("error: {:?}", error).as_str(), duration_ns);
         } else if let Some(ref result) = response.result {
-            let size = result.as_str().unwrap_or_default().len();
+            let size = result.get().len();
             slog!(RpcResponse, daemon: "elements", method: query, duration_ns,
                 result: format!("{ } bytes", size).as_str(),
             );
@@ -766,7 +787,7 @@ impl Rpc for Elements {
         } else {
             slog!(RpcResponse, daemon: "elements", method: query, result: "null", duration_ns);
         }
-        response.into_result::<T>()
+        response.result::<T>()
     }
 
     fn is_warming_up(&self, endpoint_name: &str) -> Result<bool, jsonrpc::Error> {
@@ -780,7 +801,8 @@ impl Clone for Elements {
         let (url, user, pass) = self.params.clone();
         Elements {
             params: self.params.clone(),
-            client: jsonrpc::client::Client::new(url, user, pass),
+            client: jsonrpc::client::Client::simple_http(url.as_str(), user, pass)
+                .expect("Problem creating Elements client"),
         }
     }
 }

@@ -333,8 +333,15 @@ impl SecurityModule for LiquidHsm {
 
     fn initialize_hsm(&self, config: InitHSM, timestamp_millis: u64) -> Result<Vec<u8>, Error> {
         log!(Debug, "initialize_hsm called: force_reinit_flag: {}", config.force_reinit_flag);
+        let return_value = self.initialize_hsm_from(config, timestamp_millis, Address::BlockSigner)?;
+        log!(Debug, "initialize_hsm returns: {:?}", return_value);
+        Ok(return_value)
+    }
+
+    fn initialize_hsm_from(&self, config: InitHSM, timestamp_millis: u64, return_address: Address) -> Result<Vec<u8>, Error> {
+        log!(Debug, "initialize_hsm_from called: force_reinit_flag: {}, ret_addr: {:?}", config.force_reinit_flag, return_address);
         let return_value = self.with_opened_socket(|mut sock| {
-            let message = message::init::HSMInit::new(config, timestamp_millis);
+            let message = message::init::HSMInit::new(config, timestamp_millis).return_address(return_address);
             send_message(&mut sock, &message)?;
             let (header, msg) = read_message(&mut sock, None)?;
             match header.command {
@@ -343,7 +350,7 @@ impl SecurityModule for LiquidHsm {
                 cmd => Err(Error::ReceivedNack(cmd))
             }
         })?;
-        log!(Debug, "initialize_hsm returns: {:?}", return_value);
+        log!(Debug, "initialize_hsm_from returns: {:?}", return_value);
         Ok(return_value)
     }
 
@@ -388,6 +395,24 @@ impl SecurityModule for LiquidHsm {
         Ok(return_value)
     }
 
+    fn get_rtc(&self, return_address: Address) -> Result<u64, Error> {
+        log!(Debug, "get_rtc called");
+        let timestamp_millis = self.with_opened_socket(|mut sock| {
+            let message = message::hsm_query::GetRtc::new(return_address);
+            send_message(&mut sock, &message)?;
+            let (header, msg) = read_message(&mut sock, None)?;
+            match header.command {
+                Command::HSMRtcTimeReply => {
+                    let encoded_time: [u8; 8] = msg[..].try_into()
+                        .map_err(|_| Error::Decoding("invalid rtc payload"))?;
+                    Ok(u64::from_le_bytes(encoded_time))
+                }
+                cmd => Err(Error::ReceivedNack(cmd))
+            }
+        })?;
+        log!(Debug, "get_rtc returns: {:?}", timestamp_millis);
+        Ok(timestamp_millis)
+    }
 }
 
 // Helper functions for serial I/O

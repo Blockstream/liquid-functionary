@@ -14,7 +14,6 @@
 //You should have received a copy of the GNU Affero General Public License
 //along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-use anyhow;
 use regex::Regex;
 use std::fs::{read_to_string, OpenOptions};
 use std::io::Write;
@@ -40,14 +39,14 @@ fn main_inner() -> Result<(), anyhow::Error> {
             );
         } else {
             modified_file.push_str(line);
-            modified_file.push_str("\n");
+            modified_file.push('\n');
         }
     }
 
     if orig_file != modified_file {
         let mut file =
             OpenOptions::new().truncate(true).write(true).open("./src/constants.rs").unwrap();
-        file.write(modified_file.as_bytes()).unwrap();
+        file.write_all(modified_file.as_bytes()).unwrap();
 
         // Tell Cargo that if the given files changes, to rerun this build script.
         println!("cargo:rerun-if-changed=../");

@@ -14,16 +14,16 @@
 //You should have received a copy of the GNU Affero General Public License
 //along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
+use crate::constants::HSM_MAX_MESSAGE_SIZE;
 use crate::error::Error;
 use crate::frame_reader::Decoder;
-use crate::constants::{ HSM_MAX_MESSAGE_SIZE};
 use anyhow::Context;
 use bitcoin::hashes::hex::ToHex;
 use bitcoin::hashes::{sha256d, Hash};
 use byteorder::{LittleEndian, ReadBytesExt};
 use functionary_common::hsm::{Address, Command, Header, HEADER_LEN};
 use std::fmt::{Display, Formatter};
-use std::io::{ Read};
+use std::io::Read;
 
 /// An HSM message struct that includes the sequence number, or lack there of, as a separate field so it can be handled correctly
 #[derive(Clone, Debug)]
@@ -55,8 +55,7 @@ impl ParallelPortMessage {
                     "Header length and body length do not match (Expected: {}, Actual: {})",
                     self.header.length,
                     self.payload.len()
-                )
-                .to_string(),
+                ),
             ));
         }
         let hash = sha256d::Hash::hash(self.payload.as_slice());

@@ -35,7 +35,7 @@ pub fn log<T: fmt::Display>(file: &str, line: u32, level: crate::Severity, messa
     // Since these originated from legacy logs, there are no instances of the struct elsewhere;
     // hence, the empty string is passed to log().
 
-    use get_round_stage;
+    use get_logging_context;
     use LegacyUnconvertedLogTrace;
     use LegacyUnconvertedLogDebug;
     use LegacyUnconvertedLogInfo;
@@ -47,32 +47,32 @@ pub fn log<T: fmt::Display>(file: &str, line: u32, level: crate::Severity, messa
         crate::Severity::Trace => {
             crate::Log::log(
                 &LegacyUnconvertedLogTrace{ message: message.to_string() },
-                &file, line, "", &get_round_stage(),
+                &file, line, "", &get_logging_context(),
             );
         }
         crate::Severity::Debug => {
             crate::Log::log(&LegacyUnconvertedLogDebug{ message: message.to_string() },
-                &file, line, "", &get_round_stage(),
+                &file, line, "", &get_logging_context(),
             );
         }
         crate::Severity::Info => {
             crate::Log::log(&LegacyUnconvertedLogInfo{ message: message.to_string() },
-                &file, line, "", &get_round_stage(),
+                &file, line, "", &get_logging_context(),
             );
         }
         crate::Severity::Warn => {
             crate::Log::log(&LegacyUnconvertedLogWarn{ message: message.to_string() },
-                &file, line, "", &get_round_stage(),
+                &file, line, "", &get_logging_context(),
             );
         }
         crate::Severity::Error => {
             crate::Log::log(&LegacyUnconvertedLogError{ message: message.to_string() },
-                &file, line, "", &get_round_stage(),
+                &file, line, "", &get_logging_context(),
             );
         }
         crate::Severity::Fatal => {
             crate::Log::log_fatal(&LegacyUnconvertedLogFatal{ message: message.to_string() },
-                &file, line, "", &get_round_stage(),
+                &file, line, "", &get_logging_context(),
             );
         }
     }

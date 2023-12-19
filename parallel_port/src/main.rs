@@ -15,9 +15,9 @@
 //along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 mod config;
+mod constants;
 mod error;
 mod frame_reader;
-mod constants;
 mod message;
 mod serial_manager;
 mod serial_port_listener;
@@ -28,20 +28,23 @@ mod socket_manager;
 
 #[macro_use]
 extern crate functionary_logs;
-use crate::config::{ParallelPortConfig, CHANNEL_BUFFER_SIZE};
+extern crate functionary_common;
+
+use crate::config::{ParallelPortConfig, CHANNEL_BUFFER_SIZE, ParallelPortConfigFile};
 use crate::message::{MessageSource, ParallelPortMessage};
 use crate::serial_manager::SerialPortManager;
 use crate::socket_manager::SocketManager;
 use anyhow::bail;
 use bitcoin::hashes::hex::ToHex;
 use clap::{App, Arg};
-use functionary_common::hsm::{Address, Command, MESSAGE_VERSION};
-use functionary_logs::Severity::Debug;
 use constants::FUNCTIONARY_VERSION;
-use std::ops::Div;
+use functionary_common::hsm::{Address, Command, MESSAGE_VERSION};
+use std::path::Path;
+use std::str::FromStr;
 use std::sync::mpsc;
-use std::time::{Duration, Instant};
-use std::{io, thread};
+use std::{fs, io};
+use std::time::Instant;
+use std::ops::Div;
 
 const EXIT_FAILURE: i32 = 1;
 
@@ -62,6 +65,17 @@ fn main_inner() -> anyhow::Result<()> {
                 .required(true)
                 .takes_value(true),
         )
+        .arg(Arg::with_name("baud")
+            .help("Set the baud rate of the serial port, will override any config file setting if present")
+            .index(3)
+            .takes_value(true))
+        .arg(
+            Arg::with_name("datadir")
+                .help("Directory path where the config file is located")
+                .required(false)
+                .takes_value(true)
+                .long("datadir"),
+        )
         .get_matches();
 
     let (serial_port_path, sockets_dir) =
@@ -70,12 +84,22 @@ fn main_inner() -> anyhow::Result<()> {
             (_, _) => bail!("Could not parse command line arguments"),
         };
 
-    functionary_logs::initialize(Debug, None, None, "parallel_port", Box::new(io::stderr()));
+    let mut config = read_configuration(matches.value_of("datadir"));
+
+    functionary_logs::set_logging_context(functionary_logs::LoggingContext::Generic(Default::default()));
+    functionary_logs::initialize(config.log_level, None, None, "parallel_port", Box::new(io::stderr()));
+
+    // Check if the `baud` command line argument was passed
+    if let Some(baud_str) = matches.value_of("baud") {
+        if let Ok(baud_u32) = u32::from_str(baud_str) {
+            log!(Info, "Using baud setting from command line argument: {}", baud_u32);
+            config.serial_port_baud = baud_u32;
+        }
+    }
 
     log!(Info, "Functionary Software Version  : {}", FUNCTIONARY_VERSION);
-    log!(Info, "Using: {} {}", serial_port_path, sockets_dir);
+    log!(Info, "Using: {} {} with {} baud", serial_port_path, sockets_dir, config.serial_port_baud);
 
-    let config = ParallelPortConfig::default();
     if config.increment_sequence_numbers {
         log!(Info, "HSM sequence numbers enabled");
     }
@@ -85,7 +109,7 @@ fn main_inner() -> anyhow::Result<()> {
     let mut socket_manager =
         SocketManager::initialize(sockets_dir, message_bus_tx.clone(), &config)?;
     let mut serial_port_manager =
-        SerialPortManager::new(serial_port_path, &config, message_bus_tx.clone())?;
+        SerialPortManager::new(serial_port_path, &config, message_bus_tx)?;
     serial_port_manager.open()?;
 
     // Main Loop
@@ -108,8 +132,6 @@ fn main_inner() -> anyhow::Result<()> {
                 log!(Error, "Couldn't send HSM get version via serial: {}", e);
                 serial_port_manager.cycle()?;
             }
-            log!(Debug, "Sleeping 5 seconds before continuing");
-            thread::sleep(Duration::from_secs(5));
         }
 
         // Poll for any received messages from Serial port
@@ -131,13 +153,6 @@ fn main_inner() -> anyhow::Result<()> {
                 // comments below.
                 //Command::TamperDetectResponse - apparently not currently being used?
                 //Command::TamperDetectEnable
-                //Command::HSMInit
-                //Command::HSMInitReply
-                //Command::HSMGetRtcTime
-                //Command::HSMAddEntropy
-                //Command::HSMGetSigningKey
-                //Command::HSMGetRestoreKey
-                //Command::HSMGetVersion
                 if message.header.address == Address::ParallelPort {
                     match message.header.command {
                         // NackInternal V1 HSM w/o a RTC sends this in reply to GET_RTC_TIME
@@ -151,6 +166,18 @@ fn main_inner() -> anyhow::Result<()> {
                                 "Received HSM_ON_FIRE message: {}",
                                 message.payload.to_hex()
                             );
+                        }
+                        Command::HSMGetVersion => {
+                            log!(Debug, "GetVersion request received");
+                            if let Err(e) = serial_port_manager.send_empty_message(
+                                message.header.return_address,
+                                Address::ParallelPort,
+                                Command::HSMGetVersionReply,
+                                MESSAGE_VERSION,
+                            ) {
+                                log!(Error, "Couldn't send getversion reply via serial: {}", e);
+                                serial_port_manager.cycle()?;
+                            }
                         }
                         Command::HSMHeartbeat => {
                             log!(Debug, "Heartbeat request received");
@@ -166,6 +193,9 @@ fn main_inner() -> anyhow::Result<()> {
                         }
                         Command::HSMHeartbeatReply => {
                             log!(Debug, "Heartbeat reply received");
+                        }
+                        Command::NackUnsupported => {
+                            log!(Error, "NackUnsupported received on serial port");
                         }
                         _ => {
                             log!(
@@ -224,7 +254,7 @@ fn main() {
         // This formatting is based on anyhow's fmt::Debug impl.
         eprintln!("ERROR: {}", error);
         if let Some(cause) = error.source() {
-            println!("");
+            println!();
             eprintln!("Caused by:");
             for error in anyhow::Chain::new(cause) {
                 eprintln!(" * {}", error);
@@ -253,6 +283,46 @@ fn attempt_forward_message_from_serial(
             remote_msg_version,
         ) {
             log!(Error, "Error forwarding nack delivery failed via serial: {}", e);
+        }
+    }
+}
+
+fn read_configuration(datadir: Option<&str>) -> ParallelPortConfig {
+    //look for config file
+    //first look in datadir location if config.toml exists
+    let config_path = match datadir {
+        Some(datadir_str) => {
+            let datadir_path = Path::new(datadir_str).join("config.toml");
+            if datadir_path.exists() {
+                Some(datadir_path)
+            } else {
+                panic!("Cannot find `config.toml` at provided datadir location {}", datadir_str);
+            }
+        }
+        None => {
+            // If there isn't a `datadir` argument provided check `pwd`
+            let pwd_path = Path::new("./config.toml");
+            if pwd_path.exists() {
+                Some(pwd_path.into())
+            } else {
+                None
+            }
+        }
+    };
+
+    match config_path {
+        None => ParallelPortConfig::default(),
+        Some(config_path) => {
+            let s = match fs::read_to_string(&config_path) {
+                Ok(s) => s,
+                Err(e) => panic!("Failed to read configuration {}: {}", config_path.display(), e),
+            };
+            match toml::from_str::<ParallelPortConfigFile>(&s) {
+                Ok(config) => ParallelPortConfig::from(config),
+                Err(e) => {
+                    panic!("Failed to parse configuration: {}", e);
+                }
+            }
         }
     }
 }

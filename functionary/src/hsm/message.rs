@@ -172,26 +172,36 @@ pub mod init {
                 // Restore mode passes in the two random keys prev generated
                 payload.extend(&config.blocksign_restore_key.unwrap()[..]);
                 payload.extend(&config.watchman_restore_key.unwrap()[..]);
+                log!(Debug, "added bs and wm restore keys");
             }
 
             // "Secure" restore mode passes in the ECIES-encrypted blob
             // With necessary meta-data for decryption by the HSM
             payload.extend(&config.encrypted_restore_blob[..]);
+            log!(Debug, "added {} blob bytes", config.encrypted_restore_blob.len());
 
             // Normal init mode only needs user key
             payload.extend(&config.user_key.unwrap()[..]);
+            log!(Debug, "added {} user_key bytes", config.user_key.unwrap().len());
 
             payload.extend(&timestamp_bytes);
+            log!(Debug, "added {} timestamp_bytes bytes", timestamp_bytes.len());
 
             HSMInit {
                 msg_header: Header::for_data(
                     MESSAGE_VERSION,
-                    Address::ParallelPort,
+                    Address::Maintenance,
                     Address::BlockSigner,
                     Command::HSMInit,
                     &payload[..]),
                 payload: payload
             }
+        }
+
+        /// Modify the return address of the associated message
+        pub fn return_address(mut self, new_return_address: Address) -> Self {
+            self.msg_header.return_address = new_return_address;
+            self
         }
     }
 
@@ -206,35 +216,28 @@ pub mod hsm_query {
     use common::hsm::{Address, Command, Header, Message};
     use common::hsm::MESSAGE_VERSION;
 
-    /// Representation of a `HSMInit` HSM message
-    #[derive(Clone, PartialEq, Eq, Debug)]
-    pub struct GetSigningKey {
-        msg_header: Header
-    }
+    macro_rules! define_empty_message {
+        ($name:ident, $cmd:ident) => {
+            #[allow(missing_docs)]  // these are all POD types
+            #[derive(Clone, PartialEq, Eq, Debug)]
+            pub struct $name(Header);
 
-    impl GetSigningKey {
-        /// Returns a new GetSigningKey message taking a parallel_port return address as parameter.
-        pub fn new(return_address: Address) -> GetSigningKey {
-            GetSigningKey {
-                msg_header: Header::for_data(
-                    MESSAGE_VERSION,
-                    Address::ParallelPort,
-                    return_address,
-                    Command::HSMGetSigningKey,
-                    &[])
+            impl $name {
+                #[allow(missing_docs)]
+                pub fn new(return_address: Address) -> $name {
+                    $name(Header::for_data(MESSAGE_VERSION, Address::Maintenance, return_address, Command::$cmd, &[]))
+                }
+            }
+
+            impl Message for $name {
+                fn header(&self) -> &Header { &self.0 }
+                fn payload(&self) -> &[u8] { &[] }
             }
         }
     }
 
-    impl Message for GetSigningKey {
-        fn header(&self) -> &Header {
-            &self.msg_header
-        }
-
-        fn payload(&self) -> &[u8] {
-            &[]
-        }
-    }
+    define_empty_message!(GetSigningKey, HSMGetSigningKey);
+    define_empty_message!(GetRtc, HSMGetRtcTime);
 }
 
 /// Watchman-related messages
@@ -499,7 +502,7 @@ mod tests {
                              Ack, NackRetry, NackBadData, NackInternal, NackTooMany, NackRateLimit,
                              HsmOnFire, NackUnsupported, NackDeliveryFailed, NackNotAllowed,
                              NackInvalid);
-        check_enum!(Address, BlockSigner, Watchman, ParallelPort, Query, Update);
+        check_enum!(Address, BlockSigner, Watchman, ParallelPort, Query, Update, Maintenance);
     }
 
     #[test]

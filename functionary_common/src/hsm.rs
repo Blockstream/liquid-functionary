@@ -40,6 +40,8 @@ pub enum Address {
     Query = 2,
     /// Update tool address
     Update = 3,
+    /// Maintenance process address
+    Maintenance = 4,
     /// ParallelPort itself
     ParallelPort = 0xff
 }
@@ -301,6 +303,7 @@ impl Address {
             0x01 => Ok(Address::Watchman),
             0x02 => Ok(Address::Query),
             0x03 => Ok(Address::Update),
+            0x04 => Ok(Address::Maintenance),
             // unreachable 0xff retained for historical/searching reasons
             0x0f | 0xff => Ok(Address::ParallelPort),
             _ => Err(Error::BadAddress(b))

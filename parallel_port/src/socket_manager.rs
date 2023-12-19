@@ -68,7 +68,7 @@ impl SocketManager {
                     thread::Builder::new()
                         .name(format!("socket {} listener", i))
                         .spawn(move || listener.run())
-                        .expect(format!("Couldn't spawn thread for socket {}", i).as_str());
+                        .unwrap_or_else(|_| panic!("Couldn't spawn thread for socket {}", i));
                 }
                 Err(e) => anyhow::bail!(
                     "Problem opening socket {} on {}: {}",

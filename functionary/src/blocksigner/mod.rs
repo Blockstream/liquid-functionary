@@ -44,7 +44,7 @@ use message::{self, Message};
 use network::{self, NetworkCtrl};
 use peer::{self, PeerManager};
 use rotator::{self, RoundStage};
-use rpc::{self, BitcoinRpc, ElementsRpc, Rpc};
+use rpc::{self, BitcoinRpc, ElementsRpc, Rpc, RPC_VERIFY_ALREADY_IN_CHAIN};
 use tweak;
 
 /// The current state of the blocksigning state machine
@@ -451,6 +451,18 @@ impl BlockSigner {
             return Ok(None);
         }
 
+        match round_stage.stage {
+            common::Stage::Stage1 | common::Stage::Stage2 => {},
+            common::Stage::Stage3 | common::Stage::Stage3b => {
+                if let Some(true) = self.config.node.allow_final_stage_signing {
+                    log_signer!(Warn, self, "Allowing a late signing");
+                } else {
+                    log_signer!(Warn, self, "Avoiding a late signing");
+                    return Ok(None);
+                }
+            }
+        }
+
         let sig = match self.try_sign(block) {
             Ok(sig) => sig,
             Err(Error::HsmSignRateLimit) => {
@@ -665,9 +677,14 @@ impl rotator::Rotator for BlockSigner {
             log!(Error, "failed to update peer list: {}", e);
         }
 
-        let use_legacy_ordering = self.active_dynafed_params == Default::default() ||
-            self.cpe_set.legacy_params().is_none() ||
-            self.active_dynafed_params == self.cpe_set.legacy_params().unwrap().root;
+        let use_legacy_ordering = match self.config.node.allow_pre_dynafed_ordering {
+            Some(true) => {
+                self.active_dynafed_params == Default::default() ||
+                    self.cpe_set.legacy_params().is_none() ||
+                    self.active_dynafed_params == self.cpe_set.legacy_params().unwrap().root
+            },
+            _ => false
+        };
         log!(Debug, "use_legacy_ordering: {}", use_legacy_ordering);
 
         update_fn(::dynafed::UpdateNotif {
@@ -751,7 +768,7 @@ impl rotator::Rotator for BlockSigner {
                     }
                     false
                 }
-                Err(jsonrpc::Error::Hyper(_)) => true, // HTTP error; retry later
+                Err(jsonrpc::Error::Transport(_)) => true, // HTTP error; retry later
                 Err(e) => {
                     slog!(BlockReplacedInChain, height: *height, our_block: *hash, current: None,
                         error: Some(e.to_string()), round: rs.round, master: rs.master,
@@ -1026,11 +1043,16 @@ impl rotator::Rotator for BlockSigner {
                 }
 
                 // Send it to the daemon to check it
-                if let Err(e) = self.sidechaind.test_proposed_block(&block) {
-                    slog!(DaemonRejectBlock, header: &block.header,
-                        error: e.to_string()
-                    );
-                    return;
+                match self.sidechaind.test_proposed_block(&block) {
+                    Ok(_) => {},
+                    Err(jsonrpc::Error::Rpc(jsonrpc::error::RpcError{code, message, ..})) if code == RPC_VERIFY_ALREADY_IN_CHAIN => {
+                        slog!(DuplicateBlock, header: &block.header, error: message.to_string());
+                        return;
+                    }
+                    Err(e) => {
+                        slog!(DaemonRejectBlock, header: &block.header, error: e.to_string());
+                        return;
+                    }
                 }
 
                 // Count master's block as a precommit.

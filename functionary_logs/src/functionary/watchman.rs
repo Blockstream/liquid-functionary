@@ -349,6 +349,21 @@ pub struct ExplicitlySweepUtxo {
     pub current_height: u64,
 }
 
+/// Not sweeping UTXOs due to not meeting minimum requirements
+#[derive(Copy, Clone, PartialEq, Eq, Debug, Deserialize, Serialize)]
+pub struct NotSweepingUtxos {
+    /// The value of the UTXOs
+    pub value: u64,
+    /// Number of UTXOs
+    pub num_utxos: u64,
+    /// Minimum sweep value threshold
+    pub min_sweep_value_sats: u64,
+    /// Minimum per-mille threshold
+    pub min_sweep_per_mille: u64,
+    /// Current total funds in watchman wallet
+    pub total_funds: u64,
+}
+
 /// Reclaim a failed pegin UTXO
 #[derive(Copy, Clone, PartialEq, Eq, Debug, Deserialize, Serialize)]
 pub struct ReclaimFailedPegin {
@@ -626,6 +641,10 @@ pub struct PegoutToFederation {
 pub struct WatchmanStartStage {
 }
 
+/// Alternate final stage starting
+#[derive(Copy, Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub struct WatchmanStartAlternateThirdStage;
+
 /// Round completed successfully. This either means that we signed
 /// and broadcast a transaction, or we were idle
 #[derive(Copy, Clone, PartialEq, Eq, Debug, Serialize)]
@@ -885,6 +904,13 @@ pub struct HsmErrorOnHeader {
     pub height: u64,
     /// The hash of the header.
     pub hash: elements::BlockHash,
+    /// The error returned by the HSM.
+    pub error: String,
+}
+
+/// Update of the HSM chain state failed
+#[derive(Clone, PartialEq, Eq, Debug, Serialize)]
+pub struct HsmUpdateFailed {
     /// The error returned by the HSM.
     pub error: String,
 }

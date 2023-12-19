@@ -33,6 +33,7 @@ extern crate serde;
 #[macro_use]
 extern crate serde_derive;
 extern crate toml;
+extern crate bitcoin_hashes;
 
 extern crate functionary;
 extern crate functionary_logs as logs;
@@ -43,6 +44,8 @@ use std::{env, fs, io, time};
 use std::ffi::OsStr;
 use std::io::Write;
 use std::path::Path;
+
+use bitcoin_hashes::hex::ToHex;
 
 #[macro_use] extern crate functionary_logs;
 use functionary::common::constants::GIT_COMMIT_ID;
@@ -131,7 +134,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             return Err(e.into());
         }
     };
-    log!(Info, "HSM signing key is: {:?}", signing_key);
+    log!(Info, "HSM signing key is: {}", signing_key.to_hex());
 
     let now = match time::SystemTime::now().duration_since(time::UNIX_EPOCH) {
         Ok(t) => t,
