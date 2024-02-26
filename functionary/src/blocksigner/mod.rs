@@ -727,8 +727,8 @@ impl rotator::Rotator for BlockSigner {
         slog!(SystemInfo,
             functionary_version: env!("CARGO_PKG_VERSION"),
             git_commit: constants::GIT_COMMIT_ID,
-            our_id: self.peers.my_id(),
-            network_addresses: &self.config.local.listen_addresses,
+            our_id: Some(self.peers.my_id()),
+            network_addresses: Some(&self.config.local.listen_addresses),
         );
 
         for peer in self.peers.values() {

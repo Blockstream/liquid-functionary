@@ -130,7 +130,7 @@ checksum = "bef38d45163c2f1dde094a7dfd33ccf595c92905c8f8f4fdc18d06fb1037718a"
 
 [[package]]
 name = "blocksigner"
-version = "2.3.0"
+version = "2.3.1"
 dependencies = [
  "functionary",
  "functionary_logs",
@@ -216,7 +216,7 @@ checksum = "a06f77d526c1a601b7c4cdd98f54b5eaabffc14d5f2f0296febdc7f357c6d3ba"
 
 [[package]]
 name = "functionary"
-version = "2.3.0"
+version = "2.3.1"
 dependencies = [
  "bitcoin",
  "byteorder 0.3.13",
@@ -235,7 +235,7 @@ dependencies = [
 
 [[package]]
 name = "functionary_common"
-version = "2.3.0"
+version = "2.3.1"
 dependencies = [
  "bitcoin",
  "byteorder 0.3.13",
@@ -248,7 +248,7 @@ dependencies = [
 
 [[package]]
 name = "functionary_logs"
-version = "2.3.0"
+version = "2.3.1"
 dependencies = [
  "bitcoin",
  "elements",
@@ -936,7 +936,7 @@ checksum = "cccddf32554fecc6acb585f82a32a72e28b48f8c4c1883ddfeeeaa96f7d8e519"
 
 [[package]]
 name = "watchman"
-version = "2.3.0"
+version = "2.3.1"
 dependencies = [
  "functionary",
  "functionary_logs",

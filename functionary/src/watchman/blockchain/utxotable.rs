@@ -72,7 +72,7 @@ use bitcoin::secp256k1::{rand, PublicKey};
 use elements;
 
 use common::BlockHeight;
-use common::constants::{CONSTANTS, MAX_PROPOSAL_TOTAL_HSM_PAYLOAD, MAXIMUM_REQUIRED_INPUTS};
+use common::constants::{CONSTANTS, MAX_PROPOSAL_TOTAL_HSM_PAYLOAD, MAX_PROPOSAL_TX_WEIGHT, MAXIMUM_REQUIRED_INPUTS};
 use descriptor::{LiquidDescriptor, TweakableDescriptor};
 use common::hsm;
 use logs::ProposalError;
@@ -1066,6 +1066,12 @@ impl UtxoTable {
         let mut proposal = transaction::Proposal::new(change_spk);
         let change_desc = consensus.active_descriptor();
 
+        let max_satisfaction_weight = change_desc.satisfaction_weight();
+        // Calculate the maximum number of inputs a proposal can support (assuming all are federation inputs) before
+        // overflowing the MAX_PROPOSAL_TX_WEIGHT
+        let max_inputs = MAX_PROPOSAL_TX_WEIGHT / max_satisfaction_weight;
+        let three_quarters_max_inputs = 3 * max_inputs / 4;
+
         let min_amount = fee_pool.economical_amount(change_desc.signed_input_weight());
         slog!(StartTxProposal, fee_rate: fee_pool.summary().fee_rate,
             available_fees: fee_pool.summary().available_funds, economical_amount: min_amount,
@@ -1122,6 +1128,18 @@ impl UtxoTable {
                 hash_utxo(utxo),
             )
         );
+
+        let utxos_len = utxos.len();
+        if utxos_len > three_quarters_max_inputs {
+            // After randomly sorting the UTXO set we will sort from 75% of the max allowable inputs onwards so that the largest
+            // UTXOs are found from that index onwards. This means that the first 75% of max allowable inputs that can be added
+            // to a proposal are still randomized but above 75% the max number of inputs we start choosing the largest UTXOs
+            // to fund the proposal without overflowing the max allowable weight
+            utxos[three_quarters_max_inputs..utxos_len].sort_by(
+                |a, b| b.value.partial_cmp(&a.value).expect("value comparison")
+            );
+        }
+
         let mut utxos_iter = utxos.into_iter();
 
         // 2. Add pegouts

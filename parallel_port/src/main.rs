@@ -99,6 +99,12 @@ fn main_inner() -> anyhow::Result<()> {
 
     log!(Info, "Functionary Software Version  : {}", FUNCTIONARY_VERSION);
     log!(Info, "Using: {} {} with {} baud", serial_port_path, sockets_dir, config.serial_port_baud);
+    slog!(SystemInfo,
+        functionary_version: env!("CARGO_PKG_VERSION"),
+        git_commit: functionary_common::constants::GIT_COMMIT_ID,
+        our_id: None,
+        network_addresses: None,
+    );
 
     if config.increment_sequence_numbers {
         log!(Info, "HSM sequence numbers enabled");

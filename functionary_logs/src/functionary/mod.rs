@@ -50,9 +50,11 @@ pub struct SystemInfo<'a> {
     /// git commit ID the software was compiled with, and config file path
     pub git_commit: &'a str,
     /// Our own peer id.
-    pub our_id: PeerId,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub our_id: Option<PeerId>,
     /// Our own network addresses.
-    pub network_addresses: &'a [String],
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub network_addresses: Option<&'a [String]>,
 }
 
 /// Log with information about a peer
