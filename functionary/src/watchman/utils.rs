@@ -60,7 +60,7 @@ pub fn validate_failed_pegin_config_entries(config: &Configuration) -> Result<()
                         ));
                     }
                 };
-            slog!(LoadedFailedPegin, outpoint, value: output.value);
+            slog!(LoadedFailedPegin, outpoint, value: output.value.to_sat());
         }
     }
 

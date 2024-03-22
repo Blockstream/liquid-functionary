@@ -20,17 +20,18 @@
 //! confirmed in the blockchain, but not yet finalized (because it does not have
 //! enough confirmations).
 
-use std::collections::{HashSet, HashMap, BTreeMap, VecDeque};
-use std::{cmp, fmt, error, mem};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
+use std::{cmp, error, fmt, mem};
 
-use bitcoin;
-use jsonrpc;
-
+#[cfg(test)]
+use bitcoin::hashes::Hash;
 use common::BlockHeight;
-use logs::{functionary as log, get_round_stage};
 use logs::ProposalError;
-use utils::{self, BlockRef};
+use logs::{functionary as log, get_round_stage};
 use rpc::BitcoinRpc;
+use serde::de::MapAccess;
+use serde::Deserialize;
+use utils::{self, BlockRef};
 
 /// A TxIndex error.
 #[derive(Debug)]
@@ -202,8 +203,68 @@ impl<'de> serde::Deserialize<'de> for OutputMeta {
     }
 }
 
+/// Custom wrapper for `bitcoin::Transaction` to handle deserialization properly
+///
+/// This is needed *temporarily* due to https://github.com/rust-bitcoin/rust-bitcoin/pull/1068
+/// which changed the way the witness field is serialized / deserialized.
+///
+/// We still have old data files which use the previous serialization format, which is incompatible
+/// with the new change. This WitnessWrapper allows us to manually try deserializing with both
+/// methods.
+///
+/// It can be removed once we run this code in production, all the data files get updated,
+/// and we no longer need to support the old serialization format.
+
+/// A wrapper around bitcoin::TxIn which uses legacy deserialization data format for the witness
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Hash)]
+pub struct TxInWrapper {
+    /// mirror of field
+    pub previous_output: bitcoin::OutPoint,
+    /// mirror of field
+    pub script_sig: bitcoin::ScriptBuf,
+    /// mirror of field
+    pub sequence: bitcoin::Sequence,
+    /// Old serialized data format of byte arrays as opposed to hex strings
+    pub witness: Vec<Vec<u8>>,
+}
+
+impl From<TxInWrapper> for bitcoin::TxIn {
+    fn from(tx_in: TxInWrapper) -> Self {
+        bitcoin::TxIn {
+            previous_output: tx_in.previous_output,
+            script_sig: tx_in.script_sig,
+            sequence: tx_in.sequence,
+            witness: bitcoin::Witness::from(tx_in.witness.as_slice()),
+        }
+    }
+}
+
+/// A wrapper around bitcoin::Transaction which uses the legacy data format for the witness
+#[derive(Clone, PartialEq, Eq, Debug, Hash, Deserialize)]
+pub struct TransactionWrapper {
+    /// mirror of field
+    pub version: bitcoin::transaction::Version,
+    /// mirror of field
+    pub lock_time: bitcoin::absolute::LockTime,
+    /// Field using wrapped struct that contains legacy data format for witness
+    pub input: Vec<TxInWrapper>,
+    /// mirror of field
+    pub output: Vec<bitcoin::TxOut>,
+}
+
+impl From<TransactionWrapper> for bitcoin::Transaction {
+    fn from(tx: TransactionWrapper) -> Self {
+        bitcoin::Transaction {
+            version: tx.version,
+            lock_time: tx.lock_time,
+            input: tx.input.into_iter().map(|tx_in| tx_in.into()).collect(),
+            output: tx.output,
+        }
+    }
+}
+
 /// A transaction indexed by the txindex.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct Tx {
     /// The full transaction.
     pub tx: bitcoin::Transaction,
@@ -277,6 +338,96 @@ impl Tx {
                 None
             }
         })
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for Tx {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+        where
+            D: serde::Deserializer<'de>,
+    {
+        struct TxVisitor;
+
+        impl<'de> serde::de::Visitor<'de> for TxVisitor {
+            type Value = Tx;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+                formatter.write_str("TxIndex::Tx in old or new serialized format")
+            }
+
+            fn visit_map<V>(self, mut map: V) -> Result<Self::Value, V::Error>
+                where
+                    V: MapAccess<'de>,
+            {
+                let mut tx: Option<bitcoin::Transaction> = None;
+                let mut status: Option<TxStatus> = None;
+                let mut output_meta: Option<Vec<OutputMeta>> = None;
+                while let Some((key, value)) = map.next_entry::<&str, serde_json::Value>()? {
+                    match key {
+                        "tx" => {
+                            if let Some(_) = tx {
+                                return Err(serde::de::Error::duplicate_field("tx"));
+                            }
+                            if let Ok(deserialized_tx) =
+                                serde_json::from_value::<bitcoin::Transaction>(value.clone())
+                            {
+                                tx = Some(deserialized_tx)
+                            } else {
+                                // Attempt to deserialize using the old data format
+                                tx = Some(
+                                    serde_json::from_value::<TransactionWrapper>(value)
+                                        .map_err(|e| serde::de::Error::custom(e))?
+                                        .into(),
+                                );
+                            }
+                        }
+                        "status" => {
+                            if let Some(_) = status {
+                                return Err(serde::de::Error::duplicate_field("tx"));
+                            }
+                            status = Some(
+                                serde_json::from_value::<TxStatus>(value)
+                                    .map_err(|e| serde::de::Error::custom(e))?,
+                            );
+                        }
+                        "output_meta" => {
+                            if let Some(_) = output_meta {
+                                return Err(serde::de::Error::duplicate_field("output_meta"));
+                            }
+                            output_meta = Some(
+                                serde_json::from_value::<Vec<OutputMeta>>(value)
+                                    .map_err(|e| serde::de::Error::custom(e))?,
+                            );
+                        }
+                        _ => {
+                            return Err(serde::de::Error::unknown_field(
+                                key,
+                                &["tx", "status", "output_meta"],
+                            ));
+                        }
+                    }
+                }
+
+                return match (tx, status, output_meta) {
+                    (None, _, _) => Err(serde::de::Error::missing_field("tx")),
+                    (_, None, _) => Err(serde::de::Error::missing_field("status")),
+                    (_, _, None) => Err(serde::de::Error::missing_field("output_meta")),
+                    (
+                        Some(deserialized_tx),
+                        Some(deserialized_status),
+                        Some(deserialized_output_meta),
+                    ) => {
+                        return Ok(Tx {
+                            tx: deserialized_tx,
+                            status: deserialized_status,
+                            output_meta: deserialized_output_meta,
+                        })
+                    }
+                };
+            }
+        }
+
+        deserializer.deserialize_any(TxVisitor)
     }
 }
 
@@ -486,8 +637,8 @@ impl TxIndex {
             block_hash: status.hash(),
             spends_inputs: entry.iter_federation_inputs().collect(),
             handles_pegouts: entry.iter_pegouts().collect(),
-            change_outputs: entry.iter_change().map(|o| o.value).collect(),
-            total_fee_donation: entry.iter_donations().map(|o| o.value).sum(),
+            change_outputs: entry.iter_change().map(|o| o.value.to_sat()).collect(),
+            total_fee_donation: entry.iter_donations().map(|o| o.value.to_sat()).sum(),
         );
 
         if let Some(e) = self.txindex.insert(txid, entry) {
@@ -727,7 +878,7 @@ impl TxIndex {
                     slog!(FinalizeTx, txid: txid, block_height: tx.status.height().unwrap(),
                         spends_inputs: inputs,
                         handles_pegouts: pegouts,
-                        total_fee_donation: tx.iter_donations().map(|o| o.value).sum(),
+                        total_fee_donation: tx.iter_donations().map(|o| o.value.to_sat()).sum(),
                         seen_before: seen_before
                     );
 
@@ -817,9 +968,9 @@ impl TxIndex {
     pub fn insert_dummy_blocks_until(&mut self, height: BlockHeight) {
         while self.blocks.back().map(|b| b.height()).unwrap_or(0) < height {
             let new_ref = if let Some(last) = self.blocks.back() {
-                BlockRef::new(last.height() + 1, Default::default())
+                BlockRef::new(last.height() + 1, bitcoin::BlockHash::all_zeros())
             } else {
-                BlockRef::new(1, Default::default())
+                BlockRef::new(1, bitcoin::BlockHash::all_zeros())
             };
             self.blocks.push_back(BlockInfo {
                 blockref: new_ref,
@@ -836,12 +987,11 @@ pub mod tests {
     use std::cell::{Cell, RefCell};
     use std::rc::Rc;
 
-    use bitcoin::{self, Transaction};
+    use bitcoin::{Amount, BlockHash, CompactTarget, Transaction, Txid, TxMerkleNode};
+    use bitcoin::block::Header;
     use bitcoin::consensus::encode::{deserialize, serialize_hex};
 
     use super::*;
-
-    use utils::BlockRef;
 
     struct RpcDummy(
         /* chain */ Vec<bitcoin::Block>,
@@ -884,7 +1034,7 @@ pub mod tests {
     /// Constructor used in tests in other modules.
     pub fn new_tx(tx: Transaction, status: TxStatus, meta: Vec<OutputMeta>) -> Tx {
         Tx {
-            tx: tx,
+            tx: tx.into(),
             status: status,
             output_meta: meta,
         }
@@ -1000,7 +1150,7 @@ pub mod tests {
         ($txidx:expr, $active_blocks:expr, $unknown_blocks:expr) => {
             let known_len = typehint::<&[BlockData]>($active_blocks).len();
             let known_txs = typehint::<&[BlockData]>($active_blocks).iter().filter(
-                |d| d.coinbase_txid != Default::default()
+                |d| d.coinbase_txid != Txid::all_zeros()
             ).count();
 
             assert_eq!($txidx.depth, 4); // fixed
@@ -1012,7 +1162,7 @@ pub mod tests {
                     $txidx.blocks.iter().find(|b| b.height() == data.blockref.height).is_some(),
                     "active blocks {:?}", data
                 );
-                if data.coinbase_txid != Default::default() {
+                if data.coinbase_txid != Txid::all_zeros() {
                     assert!(
                         $txidx.txindex.get(&data.coinbase_txid).is_some(),
                         "active txindex {:?}", data
@@ -1147,7 +1297,7 @@ pub mod tests {
         let block0_data = BlockData {
             name: "block0",
             blockref: BlockRef::new(0, block0.block_hash()),
-            coinbase_txid: Default::default(),
+            coinbase_txid: bitcoin::Txid::all_zeros(),
         };
         // "name" is currently unused so put this line in to avoid a compile error
         block0_data.name.to_string();
@@ -1371,33 +1521,33 @@ pub mod tests {
         let mut gen_tx_with_size = || bitcoin::Transaction {
             version: {
                 tx_counter += 1;
-                tx_counter
+                bitcoin::transaction::Version::non_standard(tx_counter)
             },
-            lock_time: 0,
+            lock_time: bitcoin::blockdata::locktime::absolute::LockTime::ZERO,
             input: vec![bitcoin::TxIn {
                 previous_output: Default::default(),
                 script_sig: vec![1; 10].into(),
-                sequence: 0,
-                witness: bitcoin::Witness::from_vec(witness.clone()),
+                sequence: bitcoin::Sequence::ZERO,
+                witness: bitcoin::Witness::from_slice(&witness),
             }],
             output: vec![bitcoin::TxOut {
-                value: 0,
+                value: Amount::ZERO,
                 script_pubkey: vec![1; 10].into(),
             }],
         };
         let gen_block_with_size = |prev, txs| bitcoin::Block {
-            header: bitcoin::BlockHeader {
-                version: 0,
+            header: Header {
+                version: bitcoin::block::Version::from_consensus(0),
                 prev_blockhash: prev,
-                merkle_root: Default::default(),
+                merkle_root: TxMerkleNode::all_zeros(),
                 time: 0,
-                bits: 0,
+                bits: CompactTarget::from_consensus(0),
                 nonce: 0,
             },
             txdata: txs,
         };
 
-        let mut rpc = RpcDummy(vec![gen_block_with_size(Default::default(), vec![])], vec![]);
+        let mut rpc = RpcDummy(vec![gen_block_with_size(BlockHash::all_zeros(), vec![])], vec![]);
         let mut last_block_hash = rpc.0.last().unwrap().block_hash();
         let depth = 20;
         let mut index = TxIndex::new(0, depth);
@@ -1445,7 +1595,7 @@ pub mod tests {
         // Hardcode all transactions to have 3 relevant UTXOs, except for the transaction in BLOCK2_ALT,
         // which should only have 1 relevant UTXO until we see it again.
         // At that point 2 more will be identified (3 total).
-        let block2_alt_txid = "0eec4c7cdd05a87babd78a518347d165616428701e002dad5ba10c8ec6b1b824";
+        let block2_alt_txid = "0x0eec4c7cdd05a87babd78a518347d165616428701e002dad5ba10c8ec6b1b824";
         let (mut closure, counters) = {
             let counters = Rc::new(Cell::new((0, 0))); // tuple: (new_txs, finalized_txs)
             let seen_txids = Rc::new(RefCell::new(HashSet::<String>::new()));
@@ -1505,7 +1655,7 @@ pub mod tests {
         let block0_data = BlockData {
             name: "block0",
             blockref: BlockRef::new(0, block0.block_hash()),
-            coinbase_txid: Default::default(),
+            coinbase_txid: Txid::all_zeros(),
         };
         // "name" is currently unused so put this line in to avoid a compile error
         block0_data.name.to_string();

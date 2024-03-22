@@ -26,14 +26,13 @@ use std::sync::mpsc;
 use std::time::Duration;
 use std::{fmt, mem, thread};
 
-use bitcoin::hashes::hex::ToHex;
-use bitcoin::hashes::{self, sha256};
+use bitcoin::hashes::{self, sha256, Hash, hex::DisplayHex};
 use bitcoin::secp256k1::{self, PublicKey, Secp256k1, ecdsa::Signature};
 use common::{blockchain, util::ToBitcoinScript};
 use elements::encode::serialize_hex;
-use elements::{self, BlockHash};
-use jsonrpc;
-use miniscript::{self, TranslatePk, DescriptorTrait, Miniscript, Segwitv0};
+use elements::BlockHash;
+use elements::hex::ToHex;
+use miniscript::{TranslatePk, Miniscript, Segwitv0};
 use miniscript::policy::Liftable;
 
 use blocksigner::config::Configuration;
@@ -46,6 +45,7 @@ use peer::{self, PeerManager};
 use rotator::{self, RoundStage};
 use rpc::{self, BitcoinRpc, ElementsRpc, Rpc, RPC_VERIFY_ALREADY_IN_CHAIN};
 use tweak;
+use utils::empty_elements_block;
 
 /// The current state of the blocksigning state machine
 #[derive(Debug)]
@@ -99,7 +99,7 @@ macro_rules! log_signer {
 #[derive(Debug)]
 pub enum Error {
     /// Hex decoding error
-    Hex(hashes::Error),
+    Hex(hashes::FromSliceError),
     /// A JSONRPC error
     Rpc(jsonrpc::Error),
     /// A miniscript error.
@@ -198,8 +198,8 @@ impl fmt::Display for Error {
     }
 }
 
-impl From<hashes::Error> for Error {
-    fn from(e: hashes::Error) -> Error { Error::Hex(e) }
+impl From<hashes::FromSliceError> for Error {
+    fn from(e: hashes::FromSliceError) -> Error { Error::Hex(e) }
 }
 
 impl From<jsonrpc::Error> for Error {
@@ -310,7 +310,7 @@ impl BlockSigner {
             cpe_set: cpe_set,
             bitcoind: bitcoind,
             sidechaind: sidechaind,
-            sidechain_tip: (0, BlockHash::default()),
+            sidechain_tip: (0, BlockHash::all_zeros()),
             state: State::Starting,
             peer_mgr: PeerManager::new(config.my_id()),
             peers: peer::Map::empty(config.my_id()),
@@ -376,7 +376,7 @@ impl BlockSigner {
 
                     if let elements::BlockExtData::Dynafed { ref mut proposed, ..} = block.header.ext {
                         // propose the new CPE
-                        *proposed = target.params.clone();
+                        *proposed = elements::dynafed::Params::Full(target.params.clone());
                     } else {
                         // something has gone very wrong, the previous template header was dynafed
                         slog_fatal!(ExpectedDynafedHeader, height: height, block_hash: block.header.block_hash());
@@ -412,7 +412,7 @@ impl BlockSigner {
 
     /// Verify a block signature received from a peer
     pub fn validate_block_sig(&self, hash: BlockHash, peer: peer::Id, sig: &Signature) -> bool {
-        let msg = secp256k1::Message::from_slice(&hash[..]).expect("32-byte hash");
+        let msg = secp256k1::Message::from_digest_slice(&hash[..]).expect("32-byte hash");
         self.secp.verify_ecdsa(&msg, &sig, &self.peers[peer].sign_pk).is_ok()
     }
 
@@ -623,7 +623,7 @@ impl BlockSigner {
             },
             Err(e) => {
                 log!(Warn, "Elements reports that dynafed is NOT active, using root params from config file: {}", e);
-                self.cpe_set.pre_dynafed_params().cloned().expect("Must have pre-dynafed parameters available").params
+                elements::dynafed::Params::Full(self.cpe_set.pre_dynafed_params().cloned().expect("Must have pre-dynafed parameters available").params)
             }
         };
 
@@ -639,15 +639,12 @@ impl BlockSigner {
             slog_fatal!(UnknownParamsActivated, root: root);
         });
 
+        let mut pk_translator: tweak::KeyTranslator = tweak::KeyTranslator { };
+
         // Convert to a pubkey descriptor so that we can log it.
         // The log crate doesn't know the tweak::Key type.
-        let keyed_descriptor = params.signblock_descriptor.translate_pk::<_, _, ()>(
-            |tweaked| if let tweak::Key::Tweakable(_id, ref pk) = tweaked {
-                Ok(pk.clone())
-            } else {
-                unreachable!("config already parsed this descriptor")
-            },
-            |_pkh| unreachable!("config already parsed this descriptor"),
+        let keyed_descriptor = params.signblock_descriptor.translate_pk::<_, _>(
+            &mut pk_translator
         ).unwrap();
         slog!(BlocksignerConsensusChanged,
             params_root: root,
@@ -827,8 +824,8 @@ impl rotator::Rotator for BlockSigner {
                     proposed_params_root: proposed.calculate_root(),
                     current_fedpeg_program: current.fedpeg_program(),
                     proposed_fedpeg_program: proposed.fedpeg_program(),
-                    current_fedpeg_script: current.fedpegscript().map(|x| x.to_hex()),
-                    proposed_fedpeg_script: proposed.fedpegscript().map(|x| x.to_hex()),
+                    current_fedpeg_script: current.fedpegscript().map(|x| x.to_lower_hex_string()),
+                    proposed_fedpeg_script: proposed.fedpegscript().map(|x| x.to_lower_hex_string()),
                     descriptor_named: None,
                     descriptor_keys: None,
                     policy: None,
@@ -881,8 +878,14 @@ impl rotator::Rotator for BlockSigner {
             },
             State::SentSignature(ref mut block, sig) => (
                 // for borrowck reasons we can't maintain a borrow of `block`,
-                // so we have to move it and stick an empty block in its place
-                mem::take(block),
+                // so we have to copy it and stick an empty block in its place
+
+                // elements::Block no longer implements default
+                {
+                    let mut swap_block = empty_elements_block();
+                    mem::swap(block, &mut swap_block);
+                    swap_block
+                },
                 sig,
             ),
             State::Error(ref reason) => {
@@ -1057,7 +1060,7 @@ impl rotator::Rotator for BlockSigner {
 
                 // Count master's block as a precommit.
                 let blockhash = block.block_hash();
-                self.peer_mgr.record_precommit(peer, blockhash);
+                self.peer_mgr.record_precommit(peer, blockhash, elements::BlockHash::all_zeros());
 
                 // Check that we understand the dynafed parameters
                 if let elements::BlockExtData::Dynafed { ref current, ref proposed, .. } = block.header.ext {
@@ -1122,7 +1125,7 @@ impl rotator::Rotator for BlockSigner {
             }
             // ** precommit to signing a block **
             message::Payload::BlockPrecommit { blockhash } => {
-                self.peer_mgr.record_precommit(peer, blockhash);
+                self.peer_mgr.record_precommit(peer, blockhash, elements::BlockHash::all_zeros());
 
                 // If we have already committed, nothing more to do.
                 if let State::SentSignature(..) = self.state {
@@ -1377,8 +1380,8 @@ struct Satisfier<'a> {
 }
 
 impl<'a, T: miniscript::ToPublicKey> miniscript::Satisfier<T> for Satisfier<'a> {
-    fn lookup_ecdsa_sig(&self, signing_pk: &T) -> Option<bitcoin::EcdsaSig> {
-        let sighash = bitcoin::EcdsaSighashType::All;
+    fn lookup_ecdsa_sig(&self, signing_pk: &T) -> Option<bitcoin::ecdsa::Signature> {
+        let sighash = bitcoin::sighash::EcdsaSighashType::All;
         let peer_id = peer::Id::from(signing_pk.to_public_key().inner);
 
         if !self.peer_status.in_consensus(peer_id) {
@@ -1426,7 +1429,7 @@ impl<'a, T: miniscript::ToPublicKey> miniscript::Satisfier<T> for Satisfier<'a> 
 
         // transform the tuple into an EcdsaSig
         sig_opt.map(|(sig, hash_ty)| {
-            bitcoin::EcdsaSig {
+            bitcoin::ecdsa::Signature {
                 sig,
                 hash_ty,
             }

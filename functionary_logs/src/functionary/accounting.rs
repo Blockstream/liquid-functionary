@@ -18,8 +18,7 @@
 //! # Accounting related logs
 //!
 
-use bitcoin::{self, hashes::sha256d};
-use elements;
+use bitcoin::hashes::sha256d;
 
 /// Status of the watchman accounts
 #[derive(Copy, Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]

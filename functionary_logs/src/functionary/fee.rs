@@ -35,11 +35,16 @@ pub struct FeePoolStatus {
 /// Obtained new fee estimate from bitcoind
 #[derive(Copy, Clone, PartialEq, Eq, Debug, Serialize)]
 pub struct NewFeeEstimate {
-    /// Feerate, in satoshi per vkb
+    /// Selected fee rate, in satoshi per vkb
     pub fee_rate: u64,
+    /// Conservative fee rate, in satoshi per vkb
+    pub conservative_fee_rate: u64,
+    /// Economical fee rate, in satoshi per vkb
+    pub economical_fee_rate: u64,
     /// Number of blocks we expect a confirmation to take
-    /// at this feerate
+    /// at this fee rate
     pub blocks: u64,
+
 }
 
 /// Failed to get a fee estimate from bitcoind

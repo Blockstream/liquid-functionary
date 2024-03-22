@@ -21,7 +21,7 @@
 //!
 
 use bitcoin::secp256k1::{PublicKey, SecretKey};
-use bitcoin::hashes::sha256;
+use elements::hashes::sha256;
 use miniscript::Descriptor;
 use std::time::Duration;
 use common::constants::Constants;

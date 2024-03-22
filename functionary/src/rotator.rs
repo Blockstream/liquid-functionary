@@ -555,7 +555,6 @@ mod tests {
     use bitcoin::secp256k1::PublicKey;
     use std::str::FromStr;
 
-    use peer;
     use super::*;
 
     /// A Clock for testing that never sleeps and returns custom values for `now`. On each call to

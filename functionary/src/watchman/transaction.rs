@@ -19,11 +19,13 @@
 
 use std::collections::{HashMap, HashSet};
 use std::{cell, cmp, fmt, io, mem, ops};
+use std::convert::TryFrom;
 
-use bitcoin;
+use bitcoin::absolute::LockTime;
+use bitcoin::Amount;
+use bitcoin::script::PushBytes;
 use bitcoin::secp256k1::{self, Message, Secp256k1, ecdsa::Signature};
-use bitcoin::util::sighash::SighashCache;
-use miniscript::{self, DescriptorTrait};
+use bitcoin::sighash::SighashCache;
 
 use common::constants;
 use descriptor::LiquidDescriptor;
@@ -38,27 +40,27 @@ use watchman::utxotable::{PegoutRequest, SpendableUtxo, Utxo};
 /// Some utility methods on Bitcoin transaction
 pub trait TransactionUtil {
     /// Calculate the tx fee.
-    fn calculate_fee(&self, inputs: &[SpendableUtxo]) -> u64;
+    fn calculate_fee(&self, inputs: &[SpendableUtxo]) -> Amount;
 }
 
 impl TransactionUtil for bitcoin::Transaction {
-    fn calculate_fee(&self, inputs: &[SpendableUtxo]) -> u64 {
-        let total_out = self.output.iter().map(|o| o.value).sum::<u64>();
+    fn calculate_fee(&self, inputs: &[SpendableUtxo]) -> Amount {
+        let total_out = self.output.iter().map(|o| o.value).sum::<Amount>();
         let total_in = self.input.iter().map(|i| inputs.iter()
             .find(|i2| i2.outpoint == i.previous_output)
             .expect("provided inputs didn't match the provided transaction")
             .value
-        ).sum::<u64>();
+        ).sum::<Amount>();
         total_in - total_out
     }
 }
 
 /// A collection of signatures to be added to a transaction, one per input
 #[derive(Clone, PartialEq, Eq, Debug)]
-pub struct TransactionSignatures(Vec<(Signature, bitcoin::EcdsaSighashType)>);
+pub struct TransactionSignatures(Vec<(Signature, bitcoin::sighash::EcdsaSighashType)>);
 
-impl From<Vec<(Signature, bitcoin::EcdsaSighashType)>> for TransactionSignatures {
-    fn from(data: Vec<(Signature, bitcoin::EcdsaSighashType)>) -> TransactionSignatures {
+impl From<Vec<(Signature, bitcoin::sighash::EcdsaSighashType)>> for TransactionSignatures {
+    fn from(data: Vec<(Signature, bitcoin::sighash::EcdsaSighashType)>) -> TransactionSignatures {
         TransactionSignatures(data)
     }
 }
@@ -70,9 +72,9 @@ impl Default for TransactionSignatures {
 }
 
 impl ops::Index<ops::RangeFull> for TransactionSignatures {
-    type Output = [(Signature, bitcoin::EcdsaSighashType)];
+    type Output = [(Signature, bitcoin::sighash::EcdsaSighashType)];
 
-    fn index(&self, _: ops::RangeFull) -> &[(Signature, bitcoin::EcdsaSighashType)] {
+    fn index(&self, _: ops::RangeFull) -> &[(Signature, bitcoin::sighash::EcdsaSighashType)] {
         &self.0[..]
     }
 }
@@ -155,13 +157,13 @@ pub fn assemble_tx<C: secp256k1::Verification>(
 
     for i in 0..ret_tx.input.len() {
         let witness_script = input[i].descriptor.liquid_witness_script();
-        let sighash = cache.segwit_signature_hash(
+        let sighash = cache.p2wsh_signature_hash(
             i,
             &witness_script,
             input[i].value,
-            bitcoin::EcdsaSighashType::All
+            bitcoin::sighash::EcdsaSighashType::All
         ).unwrap();
-        let msg = Message::from_slice(&sighash).unwrap();
+        let msg = Message::from_digest_slice(&sighash.as_ref()).unwrap();
 
         // Build signature witness
         let res = input[i].descriptor.satisfy(
@@ -185,16 +187,16 @@ pub fn assemble_tx<C: secp256k1::Verification>(
         if input[i].descriptor.is_legacy_liquid_descriptor() {
             assert!(!ret_tx.input[i].script_sig.is_empty());
             ret_tx.input[i].script_sig = bitcoin::blockdata::script::Builder::new()
-                .push_slice(&witness_script.to_v0_p2wsh()[..])
+                .push_slice(<&PushBytes>::try_from(witness_script.to_p2wsh().as_bytes()).expect("script to bytes"))
                 .into_script();
 
             let mut witness = ret_tx.input[i].witness.to_vec();
             witness.pop();
             witness.push(witness_script.into_bytes());
-            ret_tx.input[i].witness = bitcoin::Witness::from_vec(witness);
+            ret_tx.input[i].witness = bitcoin::Witness::from_slice(&witness);
         } else {
             assert!(ret_tx.input[i].script_sig.is_empty());
-            assert_eq!(ret_tx.input[i].witness.last().unwrap(), &witness_script[..]);
+            assert_eq!(ret_tx.input[i].witness.last().unwrap(), witness_script.into_bytes());
         }
 
     }
@@ -212,7 +214,7 @@ enum UndoAction<'utxo> {
     /// Add a pegout, with given output weight, to the propoal
     AddPegout(elements::OutPoint),
     /// Add a change output of the given amount.
-    AddChange(u64),
+    AddChange(Amount),
     /// Add a set of inputs, one of which must be present in the final tx,
     /// to the proposal
     AddConflictSet,
@@ -267,8 +269,8 @@ impl<'a, 'utxo: 'a, 'pegout: 'a> ProposalUpdate<'a, 'utxo, 'pegout> {
                 input_amount = self.proposal.input_value();
             } else {
                 return Err(ProposalError::Unbalanced {
-                    input_value: input_amount,
-                    output_value: output_amount + fee,
+                    input_value: input_amount.to_sat(),
+                    output_value: (output_amount + fee).to_sat(),
                 });
             }
         }
@@ -280,7 +282,7 @@ impl<'a, 'utxo: 'a, 'pegout: 'a> ProposalUpdate<'a, 'utxo, 'pegout> {
         self.undo.push(UndoAction::AddPegout(pegout.request));
     }
 
-    fn add_change(&mut self, amount: u64) {
+    fn add_change(&mut self, amount: Amount) {
         self.proposal.change.push(amount);
         self.undo.push(UndoAction::AddChange(amount));
     }
@@ -344,31 +346,31 @@ pub struct Proposal<'utxo, 'pegout> {
     /// Set of pegout requests to process, with cached `TxOut` weight
     pegouts: HashMap<elements::OutPoint, &'pegout PegoutRequest>,
     /// Change `scriptPubKey`
-    change_script_pubkey: &'pegout bitcoin::Script,
+    change_script_pubkey: &'pegout bitcoin::ScriptBuf,
     /// Cached size of the change output.
     change_txout_size: usize,
     /// Set of change outputs to add
-    change: Vec<u64>,
+    change: Vec<Amount>,
 }
 
 impl<'utxo, 'pegout> Proposal<'utxo, 'pegout> {
     /// Create a new empty transaction proposal with nothing except
     /// a single dust-change output
-    pub fn new(change_spk: &'pegout bitcoin::Script) -> Proposal {
+    pub fn new(change_spk: &'pegout bitcoin::ScriptBuf) -> Proposal {
         Proposal {
             inputs: Default::default(),
             conflict_input_sets: Default::default(),
             pegouts: Default::default(),
             change_script_pubkey: change_spk,
             change_txout_size: Proposal::txout_size(change_spk),
-            change: vec![constants::MINIMUM_DUST_CHANGE],
+            change: vec![Amount::from_sat(constants::MINIMUM_DUST_CHANGE)],
         }
     }
 
     /// Helper to determine the size in bytes of an output, given a `scriptPubKey`
-    fn txout_size(spk: &bitcoin::Script) -> usize {
+    fn txout_size(spk: &bitcoin::ScriptBuf) -> usize {
         let spk_len = spk.len();
-        let vi_len = bitcoin::VarInt(spk_len as u64).len();
+        let vi_len = bitcoin::VarInt(spk_len as u64).size();
         8 + vi_len + spk_len
     }
 
@@ -534,7 +536,7 @@ impl<'utxo, 'pegout> Proposal<'utxo, 'pegout> {
     }
 
     /// Add a single change output.
-    fn add_change(&mut self, fee_pool: &fee::Pool, amount: u64) -> Result<(), ProposalError> {
+    fn add_change(&mut self, fee_pool: &fee::Pool, amount: Amount) -> Result<(), ProposalError> {
         let mut update = ProposalUpdate::new(self);
         update.add_change(amount);
         let tx_weight = update.proposal.check_signed_weight()?;
@@ -546,7 +548,7 @@ impl<'utxo, 'pegout> Proposal<'utxo, 'pegout> {
 
     /// The amount of change that is left over, if any.
     /// Returns [None] if there is already not enough change.
-    fn leftover_change(&self, fee_pool: &fee::Pool) -> Option<u64> {
+    fn leftover_change(&self, fee_pool: &fee::Pool) -> Option<Amount> {
         let input = self.input_value();
         let output = self.output_value();
         let weight = self.signed_weight();
@@ -568,7 +570,7 @@ impl<'utxo, 'pegout> Proposal<'utxo, 'pegout> {
         // assume that the coin selection put an initial "dummy change" output
         // in place, which it used for weight/input-output balance computation
         // but otherwise ignored.
-        assert_eq!(self.change, &[constants::MINIMUM_DUST_CHANGE]);
+        assert_eq!(self.change, &[Amount::from_sat(constants::MINIMUM_DUST_CHANGE)]);
         assert!(n_outputs_with_pending >= self.inputs.len(),
                 "{} < {}", n_outputs_with_pending, self.inputs.len());
 
@@ -591,7 +593,7 @@ impl<'utxo, 'pegout> Proposal<'utxo, 'pegout> {
             let n_to_add = desired_n_change - 1; // already have one change output
             // (4 weight multiplier and 2 bytes for potential nOut VarInt increase)
             let change_fee = fee_pool.calculate_fee(4 * (2 + n_to_add * self.change_txout_size));
-            let val_to_add = n_to_add as u64 * constants::MINIMUM_OPPORTUNISTIC_CHANGE + change_fee;
+            let val_to_add = Amount::from_sat(constants::MINIMUM_OPPORTUNISTIC_CHANGE) * n_to_add as u64 + change_fee;
             if extra_change < val_to_add {
                 // Try adding our currently highest-valued UTXO to the
                 // proposal, with the intent of splitting it up.
@@ -609,7 +611,7 @@ impl<'utxo, 'pegout> Proposal<'utxo, 'pegout> {
             }
 
             // Add as many change outputs as we can
-            let new_change_val = constants::MINIMUM_OPPORTUNISTIC_CHANGE;
+            let new_change_val = Amount::from_sat(constants::MINIMUM_OPPORTUNISTIC_CHANGE);
             while self.change.len() < desired_n_change && extra_change >= new_change_val {
                 // Try to add a new change output and revert in case not ok.
                 if self.add_change(fee_pool, new_change_val).is_err() {
@@ -633,7 +635,7 @@ impl<'utxo, 'pegout> Proposal<'utxo, 'pegout> {
             extra_change -= change_adj;
         }
         self.change[0] += extra_change;
-        debug_assert_eq!(Some(0), self.leftover_change(fee_pool));
+        debug_assert_eq!(Some(Amount::ZERO), self.leftover_change(fee_pool));
 
         // Done. Let's do some sanity checks.
         let total_in = self.input_value();
@@ -659,16 +661,16 @@ impl<'utxo, 'pegout> Proposal<'utxo, 'pegout> {
 
     /// Total value of all inputs, including conflict requirements.
     /// weight, which is 160 wu less).
-    pub fn input_value(&self) -> u64 {
+    pub fn input_value(&self) -> Amount {
         let conflicts = self.conflict_set();
-        self.inputs.iter().map(|utxo| utxo.value).sum::<u64>()
-            + conflicts.iter().map(|utxo| utxo.value).sum::<u64>()
+        self.inputs.iter().map(|utxo| utxo.value).sum::<Amount>()
+            + conflicts.iter().map(|utxo| utxo.value).sum::<Amount>()
     }
 
     /// Total value of all outputs, including change
-    pub fn output_value(&self) -> u64 {
-        self.pegouts.values().map(|req| req.dest_output.value).sum::<u64>()
-            + self.change.iter().cloned().sum::<u64>()
+    pub fn output_value(&self) -> Amount {
+        self.pegouts.values().map(|req| req.dest_output.value).sum::<Amount>()
+            + self.change.iter().cloned().sum::<Amount>()
     }
 
     /// Instantiates the proposal by choosing specific inputs for conflicts
@@ -698,7 +700,7 @@ pub struct ConcreteProposal {
     /// List of pegouts to process
     pub pegouts: Vec<elements::OutPoint>,
     /// List of change outputs to add
-    pub change: Vec<u64>,
+    pub change: Vec<Amount>,
 }
 
 impl ConcreteProposal {
@@ -738,7 +740,7 @@ impl ConcreteProposal {
         );
         // +2 for segwit flag and marker byte;
         // -4 for empty scriptSig in each input of `unsigned_tx`
-        unsigned_tx.weight() as usize
+        unsigned_tx.weight().to_wu() as usize
             + 2
             + input_map
                 .values()
@@ -751,7 +753,7 @@ impl ConcreteProposal {
         &self,
         mut utxo_lookup: U,
         mut pegout_lookup: P,
-        change_spk: &bitcoin::Script,
+        change_spk: &bitcoin::ScriptBuf,
         fee_check: FeeCheck,
     ) -> Result<(bitcoin::Transaction, Vec<SpendableUtxo>), ProposalError> where
         U: FnMut(&bitcoin::OutPoint) -> Option<&'u Utxo>,
@@ -810,21 +812,21 @@ impl ConcreteProposal {
         }
 
         for amount in &self.change {
-            if *amount < constants::MINIMUM_DUST_CHANGE {
+            if *amount < Amount::from_sat(constants::MINIMUM_DUST_CHANGE) {
                 return Err(ProposalError::BadChangeAmount {
-                    got: *amount,
+                    got: amount.to_sat(),
                     min: constants::MINIMUM_DUST_CHANGE,
                 });
             }
         }
 
-        let input_value = input_map.values().map(|utxo| utxo.value).sum::<u64>();
-        let output_value = pegout_map.values().map(|req| req.dest_output.value).sum::<u64>()
-            + self.change.iter().cloned().sum::<u64>();
+        let input_value = input_map.values().map(|utxo| utxo.value).sum::<Amount>();
+        let output_value = pegout_map.values().map(|req| req.dest_output.value).sum::<Amount>()
+            + self.change.iter().cloned().sum::<Amount>();
         if output_value > input_value {
             return Err(ProposalError::Unbalanced {
-                input_value: input_value,
-                output_value: output_value,
+                input_value: input_value.to_sat(),
+                output_value: output_value.to_sat(),
             });
         }
 
@@ -840,12 +842,12 @@ impl ConcreteProposal {
         }));
 
         let mut unsigned_tx = bitcoin::Transaction {
-            version: 1,
-            lock_time: 0,
+            version: bitcoin::transaction::Version(1),
+            lock_time:  LockTime::ZERO,
             input: self.inputs.iter().map(|outpoint| bitcoin::TxIn {
                 previous_output: *outpoint,
-                script_sig: bitcoin::Script::new(),
-                sequence: 0xffffffff,
+                script_sig: bitcoin::ScriptBuf::new(),
+                sequence: bitcoin::Sequence(0xffffffff),
                 witness: bitcoin::Witness::default(),
             }).collect(),
             output: outputs,
@@ -868,7 +870,7 @@ impl ConcreteProposal {
         }
 
         slog!(CreatedUnsignedTx, txid: unsigned_tx.txid(),
-            unsigned_weight: unsigned_tx.weight() as usize,
+            unsigned_weight: unsigned_tx.weight().to_wu() as usize,
             estimated_signed_weight: signed_weight
         );
 
@@ -927,7 +929,7 @@ struct Satisfier<'a, 's, C: secp256k1::Verification> {
 impl<'a, 's, C> miniscript::Satisfier<tweak::Key> for Satisfier<'a, 's, C>
     where C: secp256k1::Verification,
 {
-    fn lookup_ecdsa_sig(&self, key: &tweak::Key) -> Option<bitcoin::EcdsaSig> {
+    fn lookup_ecdsa_sig(&self, key: &tweak::Key) -> Option<bitcoin::ecdsa::Signature> {
         let (id, pk) = match *key {
             tweak::Key::Tweakable(id, pk) => (id, pk),
             tweak::Key::Tweaked { peer, tweaked_pk, .. } => (peer, tweaked_pk),
@@ -957,7 +959,7 @@ impl<'a, 's, C> miniscript::Satisfier<tweak::Key> for Satisfier<'a, 's, C>
 
         if sigs.0.len() > self.input_idx {
             let (sig, sighash) = sigs.0[self.input_idx];
-            if sighash != bitcoin::EcdsaSighashType::All {
+            if sighash != bitcoin::sighash::EcdsaSighashType::All {
                 slog!(CombineSigs, input_idx: self.input_idx, key: key.to_string(), id: Some(id),
                     sig_result: &format!("{}", SigResult::NotSighashAll),
                     msg: &format!("sighash_flag: {:?}", sighash).to_string(),
@@ -976,7 +978,7 @@ impl<'a, 's, C> miniscript::Satisfier<tweak::Key> for Satisfier<'a, 's, C>
                     sig_result: &format!("{}", SigResult::Good), msg: "",
                 );
                 let (sig, hash_ty) = sigs.0[self.input_idx];
-                let ecdsa_sig = bitcoin::EcdsaSig {
+                let ecdsa_sig = bitcoin::ecdsa::Signature {
                     sig,
                     hash_ty,
                 };
@@ -996,15 +998,13 @@ impl<'a, 's, C> miniscript::Satisfier<tweak::Key> for Satisfier<'a, 's, C>
 mod tests {
     use std::str::FromStr;
 
-    use bitcoin;
     use bitcoin::consensus::deserialize;
-    use bitcoin::util::sighash::SighashCache;
     use bitcoin::hashes::hex::FromHex;
-    use bitcoin::secp256k1::{Secp256k1, ecdsa::Signature};
+    use bitcoin::SegwitV0Sighash;
+    use bitcoin::hashes::Hash;
 
-    use miniscript::TranslatePk;
-    use tweak::{self, Tweak};
-    use watchman::utxotable::SpendableUtxo;
+    use miniscript::{translate_hash_fail, TranslatePk, Translator};
+    use tweak::Tweak;
     use super::*;
 
     /// Convert owned hashmap into hashmap of refs
@@ -1025,7 +1025,7 @@ mod tests {
         ).unwrap();
 
         let inputs = vec![
-            SpendableUtxo::new(Default::default(), 987654321, 0, Tweak::none(), "\
+            SpendableUtxo::new(Default::default(), Amount::from_sat(987654321), 0, Tweak::none(), "\
                 wsh(multi(\
                     6,\
                     [416e64726577]0307b8ae49ac90a048e9b53357a2354b3334e9c8bee813ecb98e99a7e07e8c3ba3,\
@@ -1044,11 +1044,15 @@ mod tests {
         let mut sigs = HashMap::new();
 
         let mut cache = SighashCache::new(&tx);
+
+        // In Bitcoin 0.28.2 Hashes are encoded as hex in little endian order i.e. byte at index 0 are the first characters in the hex string
+        // in Bitcoin 0.31.0 the sighashes are serialized and deserialized as big endian so the byte order needs to be reversed.
+        let mut sighash_bytes = Vec::<u8>::from_hex("7cee48b240dc974544893a10d0fb2b27b6c17379040ab54b5bce3d26e50b5c18").unwrap();
+        sighash_bytes.reverse();
+
         assert_eq!(
-            cache.segwit_signature_hash(0, &witness0, inputs[0].value, bitcoin::EcdsaSighashType::All).unwrap(),
-            bitcoin::Sighash::from_hex(
-                "7cee48b240dc974544893a10d0fb2b27b6c17379040ab54b5bce3d26e50b5c18"
-            ).unwrap()
+            cache.p2wsh_signature_hash(0, &witness0, inputs[0].value, bitcoin::sighash::EcdsaSighashType::All).unwrap(),
+            SegwitV0Sighash::from_slice(sighash_bytes.as_slice()).unwrap()
         );
 
         // missing sig
@@ -1061,7 +1065,7 @@ mod tests {
                 304402206ac44d672dac41f9b00e28f4df20c52eeb087207e8d758d76d92c6fab3b73e2\
                 b0220367750dbbe19290069cba53d096f44530e4f98acaa594810388cf7409a1870ce\
             ").unwrap(),
-            bitcoin::EcdsaSighashType::None,
+            bitcoin::sighash::EcdsaSighashType::None,
         )]));
         let tx_res = assemble_tx(&secp, &tx, &mut cache, &inputs, &ref_sigs(&sigs));
         assert!(tx_res.is_err());
@@ -1072,7 +1076,7 @@ mod tests {
                 304402206ac44d672dac41f9b00e28f4df20c52eeb087207e8d758d76d92c6fab3b73e2\
                 b0220367750dbbe19290069cba53d096f44530e4f98acaa594810388cf7409a1870cf\
             ").unwrap(),
-            bitcoin::EcdsaSighashType::All,
+            bitcoin::sighash::EcdsaSighashType::All,
         )]));
         let tx_res = assemble_tx(&secp, &tx, &mut cache, &inputs, &ref_sigs(&sigs));
         assert!(tx_res.is_err());
@@ -1083,7 +1087,7 @@ mod tests {
                 304402206ac44d672dac41f9b00e28f4df20c52eeb087207e8d758d76d92c6fab3b73e2\
                 b0220367750dbbe19290069cba53d096f44530e4f98acaa594810388cf7409a1870ce\
             ").unwrap(),
-            bitcoin::EcdsaSighashType::All,
+            bitcoin::sighash::EcdsaSighashType::All,
         )]));
         let tx_res = assemble_tx(&secp, &tx, &mut cache, &inputs, &ref_sigs(&sigs));
         assert!(tx_res.is_err()); // without 5 more sigs we can't actually finish the tx
@@ -1094,13 +1098,13 @@ mod tests {
                 304402206ac44d672dac41f9b00e28f4df20c52eeb087207e8d758d76d92c6fab3b73e2\
                 b0220367750dbbe19290069cba53d096f44530e4f98acaa594810388cf7409a1870ce\
             ").unwrap(),
-            bitcoin::EcdsaSighashType::All,
+            bitcoin::sighash::EcdsaSighashType::All,
         ), (
             Signature::from_str("\
                 304402206ac44d672dac41f9b00e28f4df20c52eeb087207e8d758d76d92c6fab3b73e2\
                 b0220367750dbbe19290069cba53d096f44530e4f98acaa594810388cf7409a1870ce\
             ").unwrap(),
-            bitcoin::EcdsaSighashType::All,
+            bitcoin::sighash::EcdsaSighashType::All,
         )]));
         let tx_res = assemble_tx(&secp, &tx, &mut cache, &inputs, &ref_sigs(&sigs));
         assert!(tx_res.is_err()); // without 5 more sigs we can't actually finish the tx
@@ -1140,25 +1144,28 @@ mod tests {
                    ))))",
                 saberhagen_id, nakamoto_id, mouton_id)).unwrap();
         let inputs = vec![
-            SpendableUtxo::new(Default::default(), 10000000, 0, Tweak::none(), descriptor.clone()),
-            SpendableUtxo::new(Default::default(), 100000000, 0, Tweak::none(), descriptor.clone()),
+            SpendableUtxo::new(Default::default(), Amount::from_sat(10000000), 0, Tweak::none(), descriptor.clone()),
+            SpendableUtxo::new(Default::default(), Amount::from_sat(100000000), 0, Tweak::none(), descriptor.clone()),
         ];
         let witness0 = inputs[0].descriptor.liquid_witness_script();
         let witness1 = inputs[1].descriptor.liquid_witness_script();
 
+        // In Bitcoin 0.28.2 Hashes are encoded as hex in little endian order i.e. byte at index 0 are the first characters in the hex string
+        // in Bitcoin 0.31.0 the sighashes are serialized and deserialized as big endian so the byte order needs to be reversed.
+        let mut input0_sighash_bytes = Vec::<u8>::from_hex("a1b5cb6a46647d5950fad46a1a394a02c045aa2814101cac0f58ec06f6fdca7d").unwrap();
+        input0_sighash_bytes.reverse();
+        let mut input1_sighash_bytes = Vec::<u8>::from_hex("e0dd62c5f33c80bb19820bc84102ec67117ca738910a90fc74cf6edfa6052ada").unwrap();
+        input1_sighash_bytes.reverse();
+
         let mut cache = SighashCache::new(&tx);
         // Note that the message actually signed are the *reverse* of the byte strings below
         assert_eq!(
-            cache.segwit_signature_hash(0, &witness0, inputs[0].value, bitcoin::EcdsaSighashType::All).unwrap(),
-            bitcoin::Sighash::from_hex(
-                "a1b5cb6a46647d5950fad46a1a394a02c045aa2814101cac0f58ec06f6fdca7d"
-            ).unwrap()
+            cache.p2wsh_signature_hash(0, &witness0, inputs[0].value, bitcoin::sighash::EcdsaSighashType::All).unwrap(),
+            bitcoin::SegwitV0Sighash::from_slice(input0_sighash_bytes.as_slice()).unwrap()
         );
         assert_eq!(
-            cache.segwit_signature_hash(1, &witness1, inputs[1].value, bitcoin::EcdsaSighashType::All).unwrap(),
-            bitcoin::Sighash::from_hex(
-                "e0dd62c5f33c80bb19820bc84102ec67117ca738910a90fc74cf6edfa6052ada"
-            ).unwrap()
+            cache.p2wsh_signature_hash(1, &witness1, inputs[1].value, bitcoin::sighash::EcdsaSighashType::All).unwrap(),
+            bitcoin::SegwitV0Sighash::from_slice(input1_sighash_bytes.as_slice()).unwrap()
         );
         let mut sigs = HashMap::new();
         // These signatures were computed with the "sighacker" CLI program as
@@ -1169,14 +1176,14 @@ mod tests {
                 3045022100e783f89e9185c02f8a9edc95b380a4a1402894a46c52e8e1597c36d0ec1d7c6002200dffe\
                 d8134262a286c462fdf65f00b5755f77982df50cc86df386bab3376f9bb\
             ").unwrap(),
-            bitcoin::EcdsaSighashType::All,
+            bitcoin::sighash::EcdsaSighashType::All,
         ), (
             // sighacker sign 11b7e73fcc3bf4cd2e0ea4452942e438a7cb0142bb75b135822c964a7b17b066 da2a05a6df6ecf74fc900a9138a77c1167ec0241c80b8219bb803cf3c562dde0
             Signature::from_str("\
                 3045022100e473896f594d13c9007779a42788b5d384c3c3010175177c5cd4ef0960a00c3f022030662\
                 2b1d9cb8d31f662abb9f0dc6132e32abd62a41d026ba7f23dc8f08dc711\
             ").unwrap(),
-            bitcoin::EcdsaSighashType::All,
+            bitcoin::sighash::EcdsaSighashType::All,
         )]));
         sigs.insert(nakamoto_id, TransactionSignatures(vec![(
             // sighacker sign eaab94ee982e57b7d0717509a518ed6a6f8dfc0eb4963297fc48c58322b791cb 7dcafdf606ec580fac1c101428aa45c0024a391a6ad4fa50597d64466acbb5a1
@@ -1184,14 +1191,14 @@ mod tests {
                 30440220511192b12830920cd2d61534a612a1fedd0d90affc0a8b0e60a36b92bb716a3602204f1e507\
                 28fb506ebbc66eb8d4bfb32d50f011eb1765f6bddb84ee83df567886b\
             ").unwrap(),
-            bitcoin::EcdsaSighashType::All,
+            bitcoin::sighash::EcdsaSighashType::All,
         ), (
             // sighacker sign eaab94ee982e57b7d0717509a518ed6a6f8dfc0eb4963297fc48c58322b791cb da2a05a6df6ecf74fc900a9138a77c1167ec0241c80b8219bb803cf3c562dde0
             Signature::from_str("\
                 3045022100bbd392e5fbe30b592f08523598862305e19051f0535107ab5bfd3f543260abcf022003707\
                 f44f411d37e3a99bb7915c94742335abe250b458786489bfbadaaa5d5b5\
             ").unwrap(),
-            bitcoin::EcdsaSighashType::All,
+            bitcoin::sighash::EcdsaSighashType::All,
         )]));
         sigs.insert(mouton_id, TransactionSignatures(vec![(
             // sighacker sign 020936aea439583c98c82c013af023b2355e4bc25049b52d4edae0c8578fcd0b 7dcafdf606ec580fac1c101428aa45c0024a391a6ad4fa50597d64466acbb5a1
@@ -1199,14 +1206,14 @@ mod tests {
                 3045022100bfa740fedc2abe6cea87af3c0d48ba07f05419be5eec19363bd63e3ba25d09d902206a3bb\
                 f0890a314451334b117372646463f65478908cefa4db1a116fdd48284d7\
             ").unwrap(),
-            bitcoin::EcdsaSighashType::All,
+            bitcoin::sighash::EcdsaSighashType::All,
         ), (
             // sighacker sign 020936aea439583c98c82c013af023b2355e4bc25049b52d4edae0c8578fcd0b da2a05a6df6ecf74fc900a9138a77c1167ec0241c80b8219bb803cf3c562dde0
             Signature::from_str("\
                 304402202df113f07a8c251135956875c28484d6adac627bf8de8243e2f18ddc4301fe9802202604b63\
                 09e3dfe812179f00f42c8fe259991db5d02e65cd3ee0fb17e26ff06d4\
             ").unwrap(),
-            bitcoin::EcdsaSighashType::All,
+            bitcoin::sighash::EcdsaSighashType::All,
         )]));
 
         // All signatures present
@@ -1296,26 +1303,37 @@ mod tests {
         // chars = 2 bytes), ends at the locktime (4 bytes before the end)
         let witness_bytes = &tx_bytes[514..tx_bytes.len() - 4];
         let mut tx = deserialize::<bitcoin::Transaction>(&tx_bytes).unwrap();
-        let direct_weight = tx.weight() as usize;
+        let direct_weight = tx.weight().to_wu() as usize;
 
         let mut input_map = HashMap::new();
         for input in &mut tx.input {
-            let witness_script = bitcoin::Script::from(input.witness.to_vec().pop().unwrap());
+            let witness_script = bitcoin::ScriptBuf::from(input.witness.to_vec().pop().unwrap());
+
+            struct PkToTweakTranslator;
+
+            impl Translator<bitcoin::PublicKey, tweak::Key, ()> for PkToTweakTranslator {
+                fn pk(&mut self, key: &bitcoin::PublicKey) -> Result<tweak::Key, ()> {
+                   tweak::Key::from_public_key(key.inner.clone())
+                }
+
+                translate_hash_fail!(bitcoin::PublicKey, tweak::Key, ());
+            }
+
+            let mut translator = PkToTweakTranslator;
 
             let miniscript = miniscript::Miniscript::parse(&witness_script)
                 .expect("valid miniscript")
                 .translate_pk(
-                    &mut |key: &bitcoin::PublicKey| tweak::Key::from_public_key(key.inner.clone()),
-                    &mut |_h: &bitcoin::hashes::hash160::Hash| unimplemented!(),
+                   &mut translator
                 )
                 .expect("translate keys");
 
             let descriptor = miniscript::Descriptor::new_sh_wsh(miniscript).unwrap();
             input_map.insert(
                 input.previous_output,
-                SpendableUtxo::new(input.previous_output, 10000, 0, Tweak::none(), descriptor),
+                SpendableUtxo::new(input.previous_output, Amount::from_sat(10000), 0, Tweak::none(), descriptor),
             );
-            input.script_sig = bitcoin::Script::new();
+            input.script_sig = bitcoin::ScriptBuf::new();
             input.witness = bitcoin::Witness::default();
         }
 
@@ -1346,7 +1364,6 @@ mod tests {
         use bitcoin::hashes::{Hash, sha256};
         use bitcoin::{Txid, OutPoint};
         use descriptor::LiquidDescriptor;
-        use elements;
 
         // A common watchman descriptor.
         let desc: miniscript::Descriptor<tweak::Key> =
@@ -1372,7 +1389,7 @@ mod tests {
         }};}
         macro_rules! tweak { () => {{
             let h = sha256::Hash::hash(&[counter.next().unwrap()]);
-            Tweak::some(&h.into_inner()[..])
+            Tweak::some(h.as_byte_array().as_slice())
         }};}
         macro_rules! utxo { ($val:expr) => {{
             SpendableUtxo::new(outpoint!(), $val, 0, tweak!(), desc.clone())
@@ -1397,9 +1414,9 @@ mod tests {
         // This is our intended fee rate.
         const FEE_RATE: u64 = 1_000; // sats / vkb
 
-        let inputs = vec![ utxo!(600_000) ];
-        let utxo_conflict = utxo!(700_000);
-        let pegouts = vec![ pegout!(500_000) ];
+        let inputs = vec![ utxo!(Amount::from_sat(600_000)) ];
+        let utxo_conflict = utxo!(Amount::from_sat(700_000));
+        let pegouts = vec![ pegout!(Amount::from_sat(500_000)) ];
 
         let proposal = Proposal {
             inputs: inputs.iter().collect(),
@@ -1407,9 +1424,14 @@ mod tests {
             pegouts: pegouts.iter().map(|r| (r.request, r)).collect(),
             change_script_pubkey: &any_script,
             change_txout_size: Proposal::txout_size(&any_script),
-            change: vec![ constants::MINIMUM_DUST_CHANGE ],
+            change: vec![ Amount::from_sat(constants::MINIMUM_DUST_CHANGE) ],
         };
-        let utxos = vec![utxo!(200_000), utxo!(300_000), utxo!(400_000), utxo!(500_000)];
+        let utxos = vec![
+            utxo!(Amount::from_sat(200_000)),
+            utxo!(Amount::from_sat(300_000)),
+            utxo!(Amount::from_sat(400_000)),
+            utxo!(Amount::from_sat(500_000))
+        ];
 
         // Here 1 and 2 is the multiplier used for the desired total outputs,
         // for 1 it will not try to add extra change, but for 2 it will try
@@ -1418,8 +1440,8 @@ mod tests {
             let desired_n = i * constants::N_MAIN_OUTPUTS_RADIUS;
 
             let mut proposal = proposal.clone();
-            let mut fee_pool = fee::Pool::new(FEE_RATE);
-            fee_pool.add(10_000);
+            let mut fee_pool = fee::Pool::new(Amount::from_sat(FEE_RATE));
+            fee_pool.add(Amount::from_sat(10_000));
             proposal.adjust_change(&fee_pool, utxos.iter(), desired_n, 5);
 
             if *i == 1 {
@@ -1430,7 +1452,7 @@ mod tests {
 
             let fee = proposal.input_value() - proposal.output_value();
             let vsize = proposal.signed_weight() as u64 / 4;
-            assert!((fee*1000)/vsize - FEE_RATE <= 2); // allowed to be off by 2
+            assert!((fee*1000)/vsize - Amount::from_sat(FEE_RATE) <= Amount::from_sat(2)); // allowed to be off by 2
             // the off by 2 is because total fee and change fee are both rounded up
         }
     }

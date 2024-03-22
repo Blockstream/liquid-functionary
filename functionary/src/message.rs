@@ -60,20 +60,18 @@
 //! using TCP.
 //!
 
-use bitcoin;
-use bitcoin::consensus;
+use bitcoin::{Amount, consensus};
 use bitcoin::hashes::{self, Hash, sha256d};
 use bitcoin::secp256k1::{self, PublicKey};
 use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
-use elements;
 use time::{now_utc, Timespec};
 
 use std::{fmt, mem, time};
 use std::io::{self, Read, Write};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use common::rollouts::ROLLOUTS;
-
 use peer;
+
 use rotator::RoundStage;
 use watchman::blockchain::{fee, OutputCounter};
 use watchman::transaction;
@@ -220,9 +218,9 @@ pub enum Error {
     /// byteorder de/serialization error
     ByteOrder(byteorder::Error),
     /// bitcoin_hashes de/serialization error
-    BitcoinHashes(hashes::Error),
+    BitcoinHashes(hashes::FromSliceError),
     /// Key error.
-    Key(bitcoin::util::key::Error),
+    Key(bitcoin::key::Error),
     /// Parse finished but more data was expected
     IncompleteRead(u64),
     /// I/O error reading from the network
@@ -270,13 +268,13 @@ impl From<elements::encode::Error> for Error {
 }
 
 #[doc(hidden)]
-impl From<hashes::Error> for Error {
-    fn from(e: hashes::Error) -> Error { Error::BitcoinHashes(e) }
+impl From<hashes::FromSliceError> for Error {
+    fn from(e: hashes::FromSliceError) -> Error { Error::BitcoinHashes(e) }
 }
 
 #[doc(hidden)]
-impl From<bitcoin::util::key::Error> for Error {
-    fn from(e: bitcoin::util::key::Error) -> Error { Error::Key(e) }
+impl From<bitcoin::key::Error> for Error {
+    fn from(e: bitcoin::key::Error) -> Error { Error::Key(e) }
 }
 
 #[doc(hidden)]
@@ -436,7 +434,7 @@ impl Header<Unsigned> {
             self.encode_unsigned(&mut engine).unwrap(),
             HEADER_LEN - SIG_LEN
         );
-        let msghash = secp256k1::Message::from_slice(
+        let msghash = secp256k1::Message::from_digest_slice(
             &sha256d::Hash::from_engine(engine)[..]
         ).unwrap(); // unwrap OK for 32-byte hash
 
@@ -800,17 +798,17 @@ impl Payload {
                 len += elements::encode::Encodable::consensus_encode(block, &mut w)?;
             },
             Payload::BlockPrecommit { ref blockhash } => {
-                len += blockhash.as_hash().encode(&mut w)?;
+                len += blockhash.as_raw_hash().encode(&mut w)?;
             },
             Payload::BlockSignature { ref blockhash, ref signature } => {
-                len += blockhash.as_hash().encode(&mut w)?;
+                len += blockhash.as_raw_hash().encode(&mut w)?;
                 len += signature.encode(&mut w)?;
             },
             Payload::TxProposal { ref proposal, .. } => {
                 len += proposal.encode(&mut w)?;
             },
             Payload::TxPrecommit { ref txid } => {
-                len += txid.as_hash().encode(&mut w)?;
+                len += txid.as_raw_hash().encode(&mut w)?;
             },
             Payload::TxSignatures { ref sigs } => {
                 len += sigs.encode(&mut w)?;
@@ -1227,7 +1225,7 @@ impl Message<secp256k1::ecdsa::Signature> {
             self.header.encode_unsigned(&mut engine).unwrap(),
             HEADER_LEN - SIG_LEN
         );
-        let msghash = secp256k1::Message::from_slice(
+        let msghash = secp256k1::Message::from_digest_slice(
             &sha256d::Hash::from_engine(engine)[..]
         ).unwrap(); // unwrap OK for 32-byte hash
         sender.verify_sig(&secp, &msghash, &self.header.signature)?;
@@ -1434,6 +1432,17 @@ impl NetEncodable for u64 {
 
     fn decode<R: Read>(mut r: R) -> Result<Self, Error> {
         Ok(r.read_u64::<LittleEndian>()?)
+    }
+}
+
+impl NetEncodable for Amount {
+    fn encode<W: Write>(&self, mut w: W) -> Result<usize, Error> {
+        w.write_u64::<LittleEndian>(self.to_sat())?;
+        Ok(8)
+    }
+
+    fn decode<R: Read>(mut r: R) -> Result<Self, Error> {
+        Ok(Amount::from_sat(r.read_u64::<LittleEndian>()?))
     }
 }
 
@@ -1792,13 +1801,10 @@ impl NetEncodable for (peer::Id, PublicKey, PublicKey) {
 
 #[cfg(test)]
 pub mod tests {
-    use bitcoin;
-    use bitcoin::hashes::{Hash, sha256d};
-    use bitcoin::secp256k1::PublicKey;
     use bitcoin::secp256k1::ecdsa::Signature;
     use std::str::FromStr;
 
-    use peer;
+    use utils::empty_elements_block;
     use super::*;
 
     pub const CONST_HEADER: [u8; HEADER_LEN] = hex!("
@@ -2108,7 +2114,7 @@ pub mod tests {
                 RoundStage::test_dummy(),
                 you,
                 101, // msgid
-                elements::Block::default(),
+                empty_elements_block(),
             )
         );
     }
@@ -2185,17 +2191,22 @@ pub mod tests {
         let proposal = transaction::ConcreteProposal {
             inputs: vec![
                 bitcoin::OutPoint {
-                    txid: bitcoin::Txid::default(),
+                    txid: bitcoin::Txid::all_zeros(),
                     vout: 10,
                 },
             ],
             pegouts: vec![
                 elements::OutPoint {
-                    txid: elements::Txid::default(),
+                    txid: elements::Txid::all_zeros(),
                     vout: 5000,
                 },
             ],
-            change: vec![1, 2, 3, 0x20000],
+            change: vec![
+                bitcoin::Amount::from_sat(1),
+                bitcoin::Amount::from_sat(2),
+                bitcoin::Amount::from_sat(3),
+                bitcoin::Amount::from_sat(0x20000)
+            ],
         };
         check_message!(
             you,

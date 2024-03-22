@@ -17,8 +17,6 @@
 //! # UTXO Tracking logs
 //!
 
-use bitcoin;
-use serde;
 use std::collections::HashSet;
 use std::fmt;
 

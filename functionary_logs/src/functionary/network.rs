@@ -50,8 +50,10 @@ impl fmt::Debug for ShortHash {
 }
 
 impl hex::FromHex for ShortHash {
-    fn from_byte_iter<I>(iter: I) -> Result<Self, hex::Error>
-        where I: Iterator<Item=Result<u8, hex::Error>> + ExactSizeIterator + DoubleEndedIterator,
+    type Err = hex::HexToArrayError;
+
+    fn from_byte_iter<I>(iter: I) -> Result<Self, hex::HexToArrayError>
+        where I: Iterator<Item=Result<u8, hex::HexToBytesError>> + ExactSizeIterator + DoubleEndedIterator,
     {
         if iter.len() == 5 {
             let mut ret = [0; 5];
@@ -60,7 +62,7 @@ impl hex::FromHex for ShortHash {
             }
             Ok(ShortHash(ret))
         } else {
-            Err(hex::Error::InvalidLength(10, 2 * iter.len()))
+            Err(hex::HexToArrayError::InvalidLength(10, 2 * iter.len()))
         }
     }
 }

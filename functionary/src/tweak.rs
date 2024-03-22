@@ -21,11 +21,13 @@
 use std::{fmt, ops};
 use std::str::FromStr;
 use elements::secp256k1_zkp;
-use miniscript;
+use miniscript::{Translator, translate_hash_fail, hash256};
+use bitcoin::hex::display::DisplayHex;
+use bitcoin::hashes::Hash;
 
-use bitcoin::hashes::{hash160, Hmac, sha256, HmacEngine, Hash, HashEngine};
-use bitcoin::hashes::hex::{self, FromHex, ToHex};
-use bitcoin::secp256k1::{self, Secp256k1, PublicKey};
+use elements::bitcoin::hashes::{Hmac, HmacEngine, HashEngine, sha256};
+use elements::bitcoin::hashes::hex::FromHex;
+use elements::bitcoin::secp256k1::{self, Secp256k1, PublicKey};
 
 use common::PeerId;
 use peer;
@@ -55,15 +57,15 @@ impl Tweak {
     /// it is assumed that all tweaks come from hashes, so this cannot happen except with
     /// negligible probability.
     pub fn tweak_secret(&self, s: &secp256k1::SecretKey) -> secp256k1::SecretKey {
-        let mut key = *s;
-        key.add_assign(&self.0[..]).expect("invalid tweak");
-        key
+        let key = *s;
+        key.add_tweak(&secp256k1::Scalar::from_be_bytes(self.0).expect("tweak to scalar"))
+            .expect("invalid tweak")
     }
 }
 
 impl fmt::LowerHex for Tweak {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        hex::format_hex(&self.0[..], f)
+        fmt::LowerHex::fmt(&self.0[..].as_hex(), f)
     }
 }
 
@@ -190,11 +192,10 @@ impl miniscript::MiniscriptKey for Key {
     // you're not explicitly mixing key hashes and keys in descriptors.
     // So in order to easily extract keys from `Semantic` policies,
     // we can just proxy the key as the hash and get all keys like that.
-    type Hash = Key;
-
-    fn to_pubkeyhash(&self) -> Self::Hash {
-        self.clone()
-    }
+    type Sha256 = Key;
+    type Hash256 = Key;
+    type Ripemd160 = Key;
+    type Hash160 = Key;
 }
 
 impl miniscript::ToPublicKey for Key {
@@ -206,8 +207,18 @@ impl miniscript::ToPublicKey for Key {
         }
     }
 
-    fn hash_to_hash160(hash: &Key) -> hash160::Hash {
-        miniscript::MiniscriptKey::to_pubkeyhash(hash.as_pubkey())
+    fn to_hash160(hash: &Key) -> bitcoin::hashes::hash160::Hash {
+        hash160::Hash::hash(&hash.as_pubkey().serialize())
+    }
+
+    fn to_sha256(hash: &Key) -> bitcoin::hashes::sha256::Hash {
+        sha256::Hash::hash(&hash.as_pubkey().serialize())
+    }
+    fn to_hash256(hash: &Key) -> miniscript::hash256::Hash {
+        hash256::Hash::hash(&hash.as_pubkey().serialize())
+    }
+    fn to_ripemd160(hash: &Key) -> bitcoin::hashes::ripemd160::Hash {
+        ripemd160::Hash::hash(&hash.as_pubkey().serialize())
     }
 }
 
@@ -216,8 +227,8 @@ impl fmt::Display for Key {
         match self {
             Key::Untweakable(ref pk) => write!(f, "[untweaked]{}", pk),
             Key::NonFunctionary(ref pk) => write!(f, "[nonfunc]{}", pk),
-            Key::Tweakable(id, ref pk) => write!(f, "[{}]{}", id.to_hex(), pk),
-            Key::Tweaked { peer, ref tweaked_pk, tweak } => {
+            Key::Tweakable(id, ref pk) => write!(f, "[{}]{}", id.to_string(), pk),
+            Key::Tweaked { peer, ref tweaked_pk, tweak   } => {
                 write!(f, "[tweaked][{:x}][{:x}]{}", peer, tweak, tweaked_pk)
             }
             Key::TweakedNonFunc { ref tweaked_pk, tweak } => {
@@ -227,7 +238,26 @@ impl fmt::Display for Key {
     }
 }
 
+/// Translator that maps functionary Keys to PublicKeys
+pub struct KeyTranslator;
+
+impl Translator<Key, PublicKey, ()> for KeyTranslator {
+    fn pk(&mut self, pk: &Key) -> Result<PublicKey, ()> {
+        if let Key::Tweakable(_id, ref pk) = pk {
+            Ok(pk.clone())
+        } else {
+            unreachable!("config already parsed this descriptor")
+        }
+    }
+
+    // We don't need to implement these methods as we are not using them in the policy.
+    // Fail if we encounter any hash fragments. See also translate_hash_clone! macro.
+    translate_hash_fail!(Key, PublicKey, ());
+}
+
+
 use bitcoin::consensus::encode::Error as EncodeErr;
+use bitcoin::hashes::{hash160, ripemd160};
 
 impl FromStr for Key {
     type Err = EncodeErr;
@@ -355,14 +385,14 @@ impl FromStr for Key {
 // NB: https://gl.blockstream.io/liquid/functionary/-/issues/961
 
 /// Tweak a MiniscriptKey to obtain the tweaked key
-pub(super) fn tweak_key<C: secp256k1_zkp::Verification>(
+pub(super) fn tweak_key<C: secp256k1_zkp::Verification + secp256k1::Context>(
     secp: &Secp256k1<C>,
-    mut key: PublicKey,
+    key: PublicKey,
     contract: &[u8],
 ) -> (PublicKey, Tweak) {
     let hmac_result = compute_tweak(&key, contract);
-    key.add_exp_assign(secp, &hmac_result[..]).expect("HMAC cannot produce invalid tweak");
-    (key, Tweak::some(&hmac_result[..]))
+    let tweaked_key = key.add_exp_tweak(secp, &secp256k1::Scalar::from_be_bytes(*hmac_result.as_byte_array()).unwrap()).expect("HMAC cannot produce invalid tweak");
+    (tweaked_key, Tweak::some(&hmac_result[..]))
 }
 
 /// Compute a tweak from some given data for the given public key
@@ -374,12 +404,9 @@ pub(super) fn compute_tweak(pk: &PublicKey, contract: &[u8]) -> Hmac<sha256::Has
 
 #[cfg(test)]
 mod tests {
-    use std::str::FromStr;
-
-    use bitcoin::secp256k1::{self, rand, SecretKey};
+    use bitcoin::secp256k1::{rand, SecretKey};
     use miniscript::{Descriptor, ToPublicKey, TranslatePk};
 
-    use peer;
     use super::*;
 
     #[test]
@@ -527,17 +554,23 @@ mod tests {
 
     #[test]
     fn test_roundtrip() {
-        // create a descriptor with all the different variants of the tweak::Key type
         let mut rng = rand::thread_rng();
         let secp = secp256k1::Secp256k1::new();
         let dummy = Descriptor::<String>::from_str(
             "wsh(multi(2,Tweakable,Tweaked,TweakedNonFunc,Untweakable,NonFunctionary))",
         ).unwrap();
-        let desc = dummy.translate_pk::<_, _, ()>(
-            |s| {
-                let key = PublicKey::from_secret_key(&secp, &SecretKey::new(&mut rng));
+
+        pub struct KeyTranslator<'a, R: rand::Rng> {
+            secp: &'a Secp256k1<secp256k1::All>,
+            rng: &'a mut R,
+        }
+
+        impl<'a, R: rand::Rng> Translator<String, Key, ()> for KeyTranslator<'a, R> {
+            fn pk(&mut self, s: &String) -> Result<Key, ()> {
+                let key = PublicKey::from_secret_key(self.secp, &SecretKey::new(self.rng));
                 let pid = peer::Id::from(key.clone());
-                let tweak = Tweak::some(&sha256::Hash::hash(&pid[..]).into_inner()[..]);
+                let tweak = Tweak::some(&sha256::Hash::hash(&pid[..]).to_byte_array());
+
                 Ok(match s.as_str() {
                     "Tweakable" => Key::Tweakable(pid, key),
                     "Tweaked" => Key::Tweaked { peer: pid, tweaked_pk: key, tweak: tweak },
@@ -546,9 +579,14 @@ mod tests {
                     "NonFunctionary" => Key::NonFunctionary(key),
                     _ => panic!("variant '{}' not handled", s),
                 })
-            },
-            |_hash| unimplemented!(),
-        ).unwrap();
+            }
+
+            translate_hash_fail!(String, Key, ());
+        }
+
+        // create a descriptor with all the different variants of the tweak::Key type
+        let mut translator = KeyTranslator { secp: &secp, rng: &mut rng,};
+        let desc = dummy.translate_pk(&mut translator).unwrap();
 
         // test that it roundtrips
         let s = desc.to_string();
@@ -558,16 +596,22 @@ mod tests {
         // then re-serialize simplified to make sure the types were kept
         // and also to have a match case over the variants to this test will
         // be added to when a new variant would be introduced
-        let redummied = desc.translate_pk::<_, _, ()>(
-            |key| Ok(match key {
-                Key::Tweakable(_, _) => "Tweakable",
-                Key::Tweaked { .. } => "Tweaked",
-                Key::TweakedNonFunc { .. } => "TweakedNonFunc",
-                Key::Untweakable(_) => "Untweakable",
-                Key::NonFunctionary(_) => "NonFunctionary",
-            }.to_owned()),
-            |_hash| unimplemented!(),
-        ).unwrap();
+        pub struct ReverseKeyTranslator;
+        impl Translator<Key, String, ()> for ReverseKeyTranslator {
+            fn pk(&mut self, key: &Key) -> Result<String, ()> {
+                Ok(match key {
+                    Key::Tweakable(_, _) => "Tweakable",
+                    Key::Tweaked { .. } => "Tweaked",
+                    Key::TweakedNonFunc { .. } => "TweakedNonFunc",
+                    Key::Untweakable(_) => "Untweakable",
+                    Key::NonFunctionary(_) => "NonFunctionary",
+                }.to_owned())
+            }
+
+            translate_hash_fail!(Key, String, ());
+        }
+        let mut reverse_translator = ReverseKeyTranslator;
+        let redummied = desc.translate_pk(&mut reverse_translator).unwrap();
         assert_eq!(dummy, redummied);
     }
 }

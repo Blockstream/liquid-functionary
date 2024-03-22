@@ -33,12 +33,11 @@ use std::path::PathBuf;
 use std::sync::mpsc;
 use std::time::Duration;
 
-use bitcoin;
 use bitcoin::consensus::encode::serialize_hex;
 use bitcoin::hashes::{Hash, sha256, sha256d};
 use bitcoin::secp256k1::{self, PublicKey, Secp256k1};
-use bitcoin::util::sighash::SighashCache;
-use jsonrpc;
+use bitcoin::sighash::SighashCache;
+use bitcoin::Txid;
 
 use common::{constants, rollouts, BlockHeight};
 use common::hsm::WatchmanSignStatus;
@@ -313,7 +312,7 @@ impl Watchman {
         };
 
         // Probe if we have an old or a new HSM.
-        let hsm_dynafed = match hsm.set_witness_script(&bitcoin::Script::new()) {
+        let hsm_dynafed = match hsm.set_witness_script(&bitcoin::ScriptBuf::new()) {
             Ok(_) => panic!("this should not be possible with an empty script.."),
             Err(common::hsm::Error::ReceivedNack(common::hsm::Command::NackNotAllowed)) => {
                 log!(Info, "our HSM supports dynafed");
@@ -387,8 +386,8 @@ impl Watchman {
             signers: HashSet::new(),
             blockchain_manager,
             round_count: 0,
-            half_confirmed_mainchain_hash: bitcoin::BlockHash::default(),
-            sidechain_hash: elements::BlockHash::default(),
+            half_confirmed_mainchain_hash: bitcoin::BlockHash::all_zeros(),
+            sidechain_hash: elements::BlockHash::all_zeros(),
             last_dynafed_root: sha256::Midstate::default(),
             hsm: hsm,
             hsm_dynafed: hsm_dynafed,
@@ -616,7 +615,7 @@ impl Watchman {
 
         // NB Because we might have received some signatures from old peers and
         // stored those with the zero txid, let's replace those.
-        self.peer_mgr.replace_empty_commits(txid);
+        self.peer_mgr.replace_empty_commits(txid, Txid::all_zeros());
 
         if !self.sufficient_precommitments(txid) {
             return Ok(None);
@@ -717,7 +716,7 @@ impl Watchman {
         slog!(WatchmanRoundComplete, txid: txid,
             inputs: &proposal.inputs, nb_inputs: proposal.inputs.len(),
             pegouts: &proposal.pegouts, nb_pegouts: proposal.pegouts.len(),
-            change: &proposal.change, nb_change: proposal.change.len(),
+            change: proposal.change.iter().map(|c| c.to_sat()).collect::<Vec<_>>().as_slice(), nb_change: proposal.change.len(),
         );
 
         if let Err(e) = self.blockchain_manager.update_from_rpc(&self.bitcoind, &self.sidechaind) {
@@ -782,10 +781,10 @@ impl Watchman {
         }
 
         let change_desc = self.blockchain_manager.consensus().active_descriptor();
-        let change_pkh = sha256d::Hash::hash(&change_desc.spk[..]);
+        let change_pkh = sha256d::Hash::hash(change_desc.spk.as_bytes());
         if let Some(ref tweaked_spk) = change_desc.csv_tweaked_spk {
             assert_ne!(ROLLOUTS.hsm_csv_tweak, rollouts::HsmCsvTweak::DynafedTransitionMade);
-            let tweaked_pkh = sha256d::Hash::hash(&tweaked_spk[..]);
+            let tweaked_pkh = sha256d::Hash::hash(tweaked_spk.as_bytes());
             if change_spk_hash != change_pkh && change_spk_hash != tweaked_pkh {
                 return Err(format!(
                     "incompatible watchman change script hash: {:x} instead of {:x}",
@@ -822,14 +821,14 @@ impl Watchman {
             &self.bitcoind,
             "bitcoin",
             peer,
-            mainchain_hash.as_hash(),
+            mainchain_hash.to_raw_hash(),
             self.n_mainchain_confirmations / 2
         )?;
         self.block_in_chain_check(
             &self.sidechaind,
             "elements",
             peer,
-            sidechain_hash.as_hash(),
+            sidechain_hash.to_raw_hash(),
             constants::SIDECHAIN_CONFIRMS
         )?;
 
@@ -1308,7 +1307,7 @@ impl rotator::Rotator for Watchman {
             message::Payload::TxPrecommit { txid } => {
                 slog!(ReceivedTxPrecommit, peer, txid);
 
-                self.peer_mgr.record_precommit(peer, txid);
+                self.peer_mgr.record_precommit(peer, txid, Txid::all_zeros());
                 self.state = match mem::replace(&mut self.state, State::Starting) {
                     // If we have already committed, check if txids match.
                     State::Signed { proposal, unsigned_tx, inputs, my_sigs } =>{
@@ -1353,7 +1352,7 @@ impl rotator::Rotator for Watchman {
                     );
                     // NB Stored as a signature of the zero txid, we will replace it with the
                     // correct txid before we validate signatures.
-                    self.peer_mgr.record_signatures(peer, Default::default(), sigs);
+                    self.peer_mgr.record_signatures(peer, Txid::all_zeros(), sigs);
                 }
             }
 
@@ -1509,7 +1508,7 @@ impl rotator::Rotator for Watchman {
             peer_keys,
             self.half_confirmed_mainchain_hash,
             self.sidechain_hash,
-            sha256d::Hash::hash(&change_spk[..]),
+            sha256d::Hash::hash(change_spk.as_bytes()),
             self.n_mainchain_confirmations,
             constants::SIDECHAIN_CONFIRMS,
             self.round_count,
@@ -1517,7 +1516,7 @@ impl rotator::Rotator for Watchman {
             self.blockchain_manager.n_in_flight_txs() as u64,
             self.blockchain_manager.output_counter(),
             self.blockchain_manager.available_output_percentiles().unwrap_or([0,0,0,0,0]),
-            pending_input_value, pending_change_value,
+            pending_input_value.to_sat(), pending_change_value.to_sat(),
             self.peer_mgr.peers_seen_last_round().into_iter().copied().collect(),
             format!("v{};git commit {}", message::MESSAGE_VERSION, constants::GIT_COMMIT_ID),
         );

@@ -21,7 +21,7 @@ use std::fmt::{Display, Formatter};
 use std::time::{Duration, SystemTime};
 
 use bitcoin::hashes::{sha256d, Hash};
-use bitcoin::hashes::hex::{self, FromHex};
+use elements::hex::{self, FromHex};
 use bitcoin::secp256k1::PublicKey;
 #[cfg(feature = "serde")]
 use serde::Deserialize;

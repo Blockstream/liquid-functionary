@@ -15,7 +15,6 @@
 //along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 
-use elements;
 use bitcoin::secp256k1::ecdsa::Signature;
 
 /// Whether a peer has a signature or not

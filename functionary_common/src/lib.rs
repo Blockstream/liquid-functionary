@@ -32,7 +32,6 @@ pub mod constants;
 pub use constants::CONSTANTS;
 
 pub mod macros;
-pub use macros::*;
 
 mod functionary;
 pub use functionary::*;
@@ -168,7 +167,7 @@ const CSV_4032_SCRIPTINT: [u8; 2] = [192, 15];
 
 /// Convert script into a variant of the script that has the mention of
 /// 4032 replaced with 2016, assuming this would only apply to CSV pushes.
-pub fn convert_into_csv_tweaked_change(script: &bitcoin::Script) -> Option<bitcoin::Script> {
+pub fn convert_into_csv_tweaked_change(script: &bitcoin::ScriptBuf) -> Option<bitcoin::ScriptBuf> {
     let mut converted = bitcoin::blockdata::script::Builder::new();
     let mut found_csv = false;
 
@@ -179,13 +178,13 @@ pub fn convert_into_csv_tweaked_change(script: &bitcoin::Script) -> Option<bitco
     for res in script.instructions() {
         match res {
             Ok(bitcoin::blockdata::script::Instruction::PushBytes(b)) => {
-                if b == CSV_4032_SCRIPTINT {
+                if b.as_bytes() == CSV_4032_SCRIPTINT {
                     if found_csv {
                         // double CSV.. doesn't seem good
                         return None;
                     }
                     found_csv = true;
-                    converted = converted.push_scriptint(2016);
+                    converted = converted.push_int(2016);
                 } else {
                     converted = converted.push_slice(b);
                 }
@@ -248,7 +247,7 @@ mod test {
     use std::str::FromStr;
 
     use bitcoin::PublicKey;
-    use miniscript::{Descriptor, DescriptorTrait};
+    use miniscript::Descriptor;
 
     /// Helper to encode an integer in script format
     /// This method is borrowed from rust-bitcoin's script.rs

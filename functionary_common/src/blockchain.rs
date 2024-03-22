@@ -123,9 +123,9 @@ fn extract_pushdata<'a>(script: &'a [u8], header: &[u8]) -> Option<&'a [u8]> {
 
 #[cfg(test)]
 mod test {
-    use bitcoin::blockdata::opcodes::all::{OP_RETURN, OP_PUSHDATA1, OP_PUSHDATA2, OP_PUSHDATA4, OP_PUSHBYTES_6};
+    //use bitcoin::blockdata::opcodes::all::{OP_RETURN, OP_PUSHDATA1, OP_PUSHDATA2, OP_PUSHDATA4, OP_PUSHBYTES_6};
+    use bitcoin::opcodes::all::*;
 
-    use crate::constants;
 
     use super::*;
 
@@ -165,15 +165,15 @@ mod test {
     #[test]
     fn it_extracts_pushdata() {
         // pushdata1
-        let haystack = &[OP_RETURN.into_u8(), OP_PUSHDATA1.into_u8(), 0x02, 0x01, 0x02];
+        let haystack = &[OP_RETURN.to_u8(), OP_PUSHDATA1.to_u8(), 0x02, 0x01, 0x02];
         let needle = &[0x01];
         let expected = &[0x02];
         assert_eq!(extract_pushdata(haystack, needle).unwrap(), expected);
 
-        let op_return = OP_RETURN.into_u8();
-        let op_pushdata1 = OP_PUSHDATA1.into_u8();
-        let op_pushdata2 = OP_PUSHDATA2.into_u8();
-        let op_pushdata4 = OP_PUSHDATA4.into_u8();
+        let op_return = OP_RETURN.to_u8();
+        let op_pushdata1 = OP_PUSHDATA1.to_u8();
+        let op_pushdata2 = OP_PUSHDATA2.to_u8();
+        let op_pushdata4 = OP_PUSHDATA4.to_u8();
 
         // pushdata2
         let haystack = &[op_return, op_pushdata2, 0x01, 0x02, 0x01, 0x02];
@@ -192,7 +192,7 @@ mod test {
         assert_eq!(extract_pushdata(haystack, needle), None);
 
         // not pushdata opcode
-        let haystack = &[op_return, OP_PUSHBYTES_6.into_u8(), 0x01, 0x02, 0x03, 0x04, 0x01, 0x02];
+        let haystack = &[op_return, OP_PUSHBYTES_6.to_u8(), 0x01, 0x02, 0x03, 0x04, 0x01, 0x02];
         assert_eq!(extract_pushdata(haystack, needle), None);
 
         // blocksigner header

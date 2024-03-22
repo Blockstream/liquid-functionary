@@ -17,12 +17,12 @@
 /// A trait to convert an object into a Bitcoin Script.
 pub trait ToBitcoinScript {
     /// Converts the object into a Bitcoin Script.
-    fn to_bitcoin_script(&self) -> bitcoin::Script;
+    fn to_bitcoin_script(&self) -> bitcoin::ScriptBuf;
 }
 
 impl ToBitcoinScript for elements::Script {
     /// Allocates a new Bitcoin Script from an Elements Script.
-    fn to_bitcoin_script(&self) -> bitcoin::Script {
+    fn to_bitcoin_script(&self) -> bitcoin::ScriptBuf {
         self.to_bytes().into()
     }
 }
@@ -32,7 +32,7 @@ pub trait ToElementsScript {
     fn to_elements_script(&self) -> elements::Script;
 }
 
-impl ToElementsScript for bitcoin::Script {
+impl ToElementsScript for bitcoin::ScriptBuf {
     /// Allocates a new Elements Script from a Bitcoin Script.
     fn to_elements_script(&self) -> elements::Script {
         self.to_bytes().into()
@@ -51,7 +51,7 @@ mod test {
         let secp = Secp256k1::new();
         let pk = sk.public_key(&secp);
 
-        let b = bitcoin::Script::new_p2pk(&pk);
+        let b = bitcoin::ScriptBuf::new_p2pk(&pk);
         let e = elements::Script::new_p2pk(&pk);
 
         assert_eq!(e, b.clone().to_elements_script());

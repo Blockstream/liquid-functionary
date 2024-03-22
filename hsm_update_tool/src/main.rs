@@ -374,8 +374,7 @@ fn update_operation(options: &UpdateArgs) -> Result<(), Box<dyn std::error::Erro
             msg_engine.input(bitcoin_message.as_bytes());
 
             let msg_hash_raw = sha256d::Hash::from_engine(msg_engine);
-            let msg_hash = msg_hash_raw.into_inner();
-            let secp_message = secp256k1::Message::from_slice(&msg_hash).unwrap();
+            let secp_message = secp256k1::Message::from_digest_slice(&msg_hash_raw[..]).unwrap();
 
             // Rest of lines follow "<pubkey> <signature>" format
             let pub_sig_pair : Vec<&str>  = line.split(" ").collect();

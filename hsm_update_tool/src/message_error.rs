@@ -35,7 +35,7 @@ pub enum MessageError {
     HSMError(hsm::Error),
     ConversionError(std::num::TryFromIntError),
     IOError(std::io::Error),
-    HashError(bitcoin::hashes::Error),
+    HashError(bitcoin::hashes::FromSliceError),
     ReceivedNACK,
     Timeout,
     BadValue,
@@ -74,8 +74,8 @@ impl From<std::io::Error> for MessageError {
     }
 }
 
-impl From<bitcoin::hashes::Error> for MessageError {
-    fn from(err: bitcoin::hashes::Error) -> Self {
+impl From<bitcoin::hashes::FromSliceError> for MessageError {
+    fn from(err: bitcoin::hashes::FromSliceError) -> Self {
         MessageError::HashError(err)
     }
 }

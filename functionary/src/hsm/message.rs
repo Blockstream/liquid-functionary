@@ -63,7 +63,6 @@ pub mod hsm_update {
 /// Blocksigner messages
 pub mod blocksigner {
     use elements::encode::serialize;
-    use elements;
     use common::hsm::{Address, Command, Header, Message};
     use common::hsm::MESSAGE_VERSION;
 
@@ -182,7 +181,7 @@ pub mod init {
 
             // Normal init mode only needs user key
             payload.extend(&config.user_key.unwrap()[..]);
-            log!(Debug, "added {} user_key bytes", config.user_key.unwrap().len());
+            log!(Debug, "added {} user_key bytes", config.user_key.unwrap().secret_bytes().len());
 
             payload.extend(&timestamp_bytes);
             log!(Debug, "added {} timestamp_bytes bytes", timestamp_bytes.len());
@@ -244,7 +243,6 @@ pub mod hsm_query {
 pub mod watchman {
     use std::io::Write;
 
-    use bitcoin;
     use bitcoin::hashes::{Hash, sha256d};
     use bitcoin::consensus::encode::{Encodable, serialize};
     use byteorder::{LittleEndian, WriteBytesExt};
@@ -352,18 +350,18 @@ pub mod watchman {
     #[derive(Clone, PartialEq, Eq, Debug)]
     pub struct SetWitnessScript<'a> {
         header: Header,
-        script: &'a bitcoin::Script
+        script: &'a bitcoin::ScriptBuf
     }
 
     impl<'a> SetWitnessScript<'a> {
         /// Creates a `SetWitnessScript` holding a reference to a script; expected to "wrap" the script and therefore not outlive it.
-        pub fn new(script: &'a bitcoin::Script) -> SetWitnessScript {
+        pub fn new(script: &'a bitcoin::ScriptBuf) -> SetWitnessScript {
             SetWitnessScript {
                 header: Header::for_data(MESSAGE_VERSION,
                                          Address::Watchman,
                                          Address::Watchman,
                                          Command::WatchmanSetWitnessScript,
-                                         &script[..]),
+                                         &script.to_bytes()),
                 script: script
             }
         }
@@ -371,7 +369,7 @@ pub mod watchman {
 
     impl<'a> Message for SetWitnessScript<'a> {
         fn header(&self) -> &Header { &self.header }
-        fn payload(&self) -> &[u8] { &self.script[..] }
+        fn payload(&self) -> &[u8] { self.script.as_bytes() }
     }
 
     /// A `SignSegwitTx` message containing all the data that the HSM needs to
@@ -406,21 +404,21 @@ pub mod watchman {
             for inp in inputs {
                 payload.extend(&inp.tweak[..]);
             }
-            payload.write_i32::<LittleEndian>(tx.version).unwrap();
+            payload.write_i32::<LittleEndian>(tx.version.0).unwrap();
             payload.extend(&hash_prevouts[..]);
             payload.extend(&hash_sequence[..]);
             payload.write_u32::<LittleEndian>(tx.output.len() as u32).unwrap();
             for out in &tx.output {
                 payload.extend(&serialize(out));
             }
-            payload.write_u32::<LittleEndian>(tx.lock_time).unwrap();
+            payload.write_u32::<LittleEndian>(tx.lock_time.to_consensus_u32()).unwrap();
             for (locked_mainout, tx_in) in inputs.iter().zip(tx.input.iter()) {
                 payload.extend(&tx_in.previous_output.txid[..]);
                 payload.write_u32::<LittleEndian>(tx_in.previous_output.vout).unwrap();
                 payload.extend(&serialize(
                     &locked_mainout.descriptor.liquid_witness_script()
                 ));
-                payload.write_u64::<LittleEndian>(locked_mainout.value).unwrap();
+                payload.write_u64::<LittleEndian>(locked_mainout.value.to_sat()).unwrap();
             }
             SignSegwitTx {
                 header: Header::for_data(

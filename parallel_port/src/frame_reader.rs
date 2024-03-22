@@ -16,7 +16,7 @@
 
 use crate::constants::{HSM_MAX_MESSAGE_SIZE, HSM_NETWORK_MAGIC};
 use crate::error::Error;
-use bitcoin::hashes::hex::ToHex;
+use bitcoin::hex::DisplayHex;
 use std::io;
 use std::io::{Cursor, Read};
 
@@ -63,7 +63,7 @@ where
                     log!(
                         Error,
                         "Stray bytes while looking for message header: {}",
-                        self.buffer[0..magic_byte_position].to_hex()
+                        self.buffer[0..magic_byte_position].as_hex()
                     );
                     // Discard stray bytes
                     self.buffer.drain(..magic_byte_position);

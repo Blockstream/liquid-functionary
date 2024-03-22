@@ -22,9 +22,7 @@
 
 use std::os::unix::net::UnixStream;
 
-use bitcoin;
 use bitcoin::secp256k1::{self, PublicKey};
-use elements;
 
 pub use self::local::{LocalBlocksigner, LocalWatchman};
 pub use self::liquid::LiquidHsm;
@@ -66,7 +64,7 @@ pub trait SecurityModule {
 
     /// Sets the signing redemption script (which will be hashed into a P2WSH-P2SH
     /// scriptpubkey). Needed by watchman to compute its change address.
-    fn set_witness_script(&self, script: &bitcoin::Script) -> Result<(), Error>;
+    fn set_witness_script(&self, script: &bitcoin::ScriptBuf) -> Result<(), Error>;
 
     /// Empties the cache of authorized addreses to prepare for a new transaction
     fn authorized_addresses_clear(&self) -> Result<(), Error>;

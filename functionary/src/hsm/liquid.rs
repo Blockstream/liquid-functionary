@@ -27,11 +27,9 @@ use std::io::{self, Read, Write};
 use std::time::Duration;
 use std::os::unix::net::UnixStream;
 
-use bitcoin;
 use bitcoin::hashes::Hash;
 use bitcoin::consensus::encode::deserialize;
 use bitcoin::secp256k1::{self, PublicKey};
-use elements;
 
 use common::PakList;
 use common::hsm::{Address, Header, HEADER_LEN, Message, Command};
@@ -145,7 +143,7 @@ impl SecurityModule for LiquidHsm {
         return_value
     }
 
-    fn set_witness_script(&self, script: &bitcoin::Script) -> Result<(), Error> {
+    fn set_witness_script(&self, script: &bitcoin::ScriptBuf) -> Result<(), Error> {
         log!(Debug, "set_witness_script called: script len: {}", script.len());
         let return_value = self.with_opened_socket(|mut sock| {
             // Send request
@@ -314,7 +312,7 @@ impl SecurityModule for LiquidHsm {
                     Ok(WatchmanState {
                         sign_status: msg[0].try_into()
                             .map_err(|_| Error::Decoding("invalid WatchmanSignStatus byte"))?,
-                        last_header: if header != Default::default() {
+                        last_header: if header != elements::BlockHash::all_zeros() {
                             Some(header)
                         } else{
                             None

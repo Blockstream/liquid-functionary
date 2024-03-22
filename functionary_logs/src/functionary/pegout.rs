@@ -19,9 +19,6 @@
 
 use std::borrow::Cow;
 
-use bitcoin;
-use elements;
-
 /// Record a pegout request
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct RecordRequest<'a> {

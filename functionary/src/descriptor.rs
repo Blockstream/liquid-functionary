@@ -65,16 +65,14 @@
 
 // This is accomplished by the `csv_tweaked_descriptor` method which simply subs out one
 // CSV value for another, for use in constructing change outputs for watchman transactions.
-
-use std::convert::Infallible;
 use std::{fmt, iter, ops};
 use std::collections::HashSet;
 use std::str::FromStr;
 
-use bitcoin::Script;
+use bitcoin::ScriptBuf;
 use bitcoin::blockdata::script;
 use bitcoin::secp256k1::{self, PublicKey, Secp256k1};
-use miniscript::{Descriptor, DescriptorTrait, Miniscript, TranslatePk};
+use miniscript::{Descriptor, Miniscript, MiniscriptKey, TranslatePk, Translator, translate_hash_fail};
 use miniscript::descriptor::{DescriptorType, ShInner, WshInner};
 use miniscript::miniscript::decode::Terminal;
 use miniscript::policy::{Liftable, Semantic};
@@ -96,7 +94,8 @@ pub trait LiquidSanityCheck {
 
 impl<P> LiquidSanityCheck for Descriptor<P>
 where
-    P: miniscript::MiniscriptKey<Hash = P> + fmt::Display + Eq + std::hash::Hash,
+    P: miniscript::MiniscriptKey<Sha256 = P, Hash256 = P, Ripemd160 = P, Hash160 = P>
+        + fmt::Display + Eq + std::hash::Hash,
 {
     fn liquid_sanity_check(&self) -> Result<(), String> {
         let tp = self.desc_type();
@@ -108,7 +107,7 @@ where
         }
 
         let lifted = self.lift().map_err(|e| format!("can't lift descriptor: {}", e))?;
-        match lifted.at_age(0) {
+        match lifted.at_age(bitcoin::Sequence(0)) {
             miniscript::policy::Semantic::Threshold(k, subs) => {
                 if k * 3 < subs.len() * 2 {
                     return Err(format!(
@@ -120,7 +119,7 @@ where
                 let mut keys = HashSet::with_capacity(subs.len());
                 for semantic in &subs {
                     let key = match semantic {
-                        Semantic::KeyHash(key) => key,
+                        Semantic::Key(key) => key,
                         s => return Err(format!("invalid policy inside threshold: {:?}", s)),
                     };
                     if !keys.insert(key) {
@@ -154,18 +153,18 @@ pub trait LiquidDescriptor {
     /// the deployed network (which Miniscript cannot produce directly)
     fn legacy_liquid_descriptor_components(&self)
         -> Option<(
-            Script,
+            ScriptBuf,
             usize,
             Vec<PublicKey>,
         )>;
 
     /// Replacement for `Descriptor::witness_script` that hacks up scripts
     /// of a certain form to match Liquid prod
-    fn liquid_witness_script(&self) -> bitcoin::Script;
+    fn liquid_witness_script(&self) -> ScriptBuf;
 
     /// Replacement for `Descriptor::script_pubkey` that hacks up scripts
     /// of a certain form to match the untweaked Liquid prod address
-    fn liquid_script_pubkey(&self) -> bitcoin::Script;
+    fn liquid_script_pubkey(&self) -> ScriptBuf;
 
     /// Replacement for `Descriptor::address` that hacks up scripts
     /// of a certain form to match the untweaked Liquid prod address
@@ -199,11 +198,14 @@ pub trait LiquidDescriptor {
 impl<P> LiquidDescriptor for Descriptor<P>
 where
     P: Clone + miniscript::ToPublicKey + FromStr,
-    P::Hash: FromStr,
+    P::Sha256: FromStr, P::Hash256: FromStr, P::Ripemd160: FromStr, P::Hash160: FromStr,
     <P as FromStr>::Err: fmt::Display,
-    <P::Hash as FromStr>::Err: fmt::Display,
+    <P::Hash256 as FromStr>::Err: fmt::Display,
+    <<P as MiniscriptKey>::Sha256 as FromStr>::Err: ToString,
+    <<P as MiniscriptKey>::Ripemd160 as FromStr>::Err: ToString,
+    <<P as MiniscriptKey>::Hash160 as FromStr>::Err: ToString
 {
-    fn legacy_liquid_descriptor_components(&self) -> Option<(Script, usize, Vec<PublicKey>)> {
+    fn legacy_liquid_descriptor_components(&self) -> Option<(ScriptBuf, usize, Vec<PublicKey>)> {
         use bitcoin::blockdata::opcodes;
 
         let ms = inner_sh_wsh_miniscript(self)?;
@@ -222,13 +224,13 @@ where
         if lser.as_bytes()[lser.len() - 1] == rser[rser.len() - 1] {
             // ...and we have an OP_VERIFY style checksequenceverify, which in
             // Liquid production was encoded with OP_DROP instead...
-            if rser[4] == opcodes::all::OP_VERIFY.into_u8() {
-                rser[4] = opcodes::all::OP_DROP.into_u8();
+            if rser[4] == opcodes::all::OP_VERIFY.to_u8() {
+                rser[4] = opcodes::all::OP_DROP.to_u8();
                 // ...then we should serialize it by sharing the OP_CMS across
                 // both branches, and add an OP_DEPTH check to distinguish the
                 // branches rather than doing the normal cascade construction
                 Some((
-                    Script::from(rser),
+                    ScriptBuf::from(rser),
                     *threshold,
                     keys.iter()
                         .map(|k| k.to_public_key().inner)
@@ -242,7 +244,7 @@ where
         }
     }
 
-    fn liquid_witness_script(&self) -> bitcoin::Script {
+    fn liquid_witness_script(&self) -> ScriptBuf {
         use bitcoin::blockdata::opcodes;
 
         if let Some((rser, threshold, keys)) = self.legacy_liquid_descriptor_components() {
@@ -268,16 +270,16 @@ where
             nearly_done.extend(rser.into_bytes());
             let insert_point = nearly_done.len() - 1;
             nearly_done.insert(insert_point, 0x68);
-            bitcoin::Script::from(nearly_done)
+            ScriptBuf::from(nearly_done)
         } else {
             self.explicit_script().expect("witness script")
         }
     }
 
-    fn liquid_script_pubkey(&self) -> bitcoin::Script {
+    fn liquid_script_pubkey(&self) -> ScriptBuf {
         if let Descriptor::Sh(sh) = self {
             if let &ShInner::Wsh(..)= sh.as_inner() {
-                self.liquid_witness_script().to_v0_p2wsh().to_p2sh()
+                self.liquid_witness_script().to_p2wsh().to_p2sh()
             } else {
                 self.script_pubkey()
             }
@@ -309,16 +311,21 @@ where
 
     fn n_signatures(&self) -> usize {
         self.lift().expect("descriptor can lift")
-            .at_age(0)
+            .at_age(bitcoin::Sequence(0))
             .minimum_n_keys().expect("policy to satisfy")
     }
 
+    #[allow(deprecated)]
     fn satisfaction_weight(&self) -> usize {
         let offset = if self.is_legacy_liquid_descriptor() {
             2 // two wasted bytes in witness script
         } else {
             0
         };
+
+        // This must be updated to the new `max_weight_to_satisfy` method during the new dynafed transition as per
+        // https://gl.blockstream.io/liquid/functionary/-/issues/1340
+        // When this is update remove the `#[allow(deprecated)]` above
         offset + self.max_satisfaction_weight().unwrap()
     }
 
@@ -340,9 +347,9 @@ where
             Terminal::Verify(ref land_v) => land_v,
             _ => return self.clone(),
         };
-        if land_v.node == Terminal::Older(4032) {
+        if land_v.node == Terminal::Older(bitcoin::Sequence(4032)) {
             let descriptor = format!("sh(wsh(or_d({},and_v(v:older(2016),{}))))", left, rand);
-            Descriptor::from_str(&descriptor).unwrap()
+            Descriptor::<P>::from_str(&descriptor).unwrap()
         } else {
             self.clone()
         }
@@ -378,7 +385,7 @@ impl iter::Iterator for FuncKeyIter {
     type Item = tweak::Key;
 
     fn next(&mut self) -> Option<Self::Item> {
-        if let miniscript::policy::Semantic::KeyHash(pkh) = self.inner.next()? {
+        if let miniscript::policy::Semantic::Key(pkh) = self.inner.next()? {
             Some(pkh)
         } else {
             panic!("valid liquid policies have keys in the threshold");
@@ -416,16 +423,46 @@ pub trait TweakableDescriptor {
     fn to_descriptor_publickey(&self) -> Descriptor<PublicKey>;
 }
 
+/// Translator that applies a pay-to-contract mapping to a key
+pub struct TweakedKeyTranslator<'a, C: secp256k1::Verification> {
+    secp: &'a Secp256k1<C>,
+    contract: &'a [u8],
+}
+
+impl<'a, C: secp256k1::Verification> Translator<tweak::Key, tweak::Key, ()> for TweakedKeyTranslator<'a, C> {
+    fn pk(&mut self, pk: &tweak::Key) -> Result<tweak::Key, ()> {
+        pk.p2c(self.secp, &self.contract[..]).map_err(|_| ())
+    }
+
+    // We don't need to implement these methods as we are not using them in the policy.
+    // Fail if we encounter any hash fragments. See also translate_hash_clone! macro.
+    translate_hash_fail!(tweak::Key, tweak::Key, ());
+}
+
+/// Translator that maps tweak::Keys to PublicKeys
+pub struct PublicKeyTranslator;
+
+impl Translator<tweak::Key, PublicKey, ()> for PublicKeyTranslator {
+    fn pk(&mut self, pk: &tweak::Key) -> Result<PublicKey, ()> {
+        Ok(*pk.as_pubkey())
+    }
+
+    // We don't need to implement these methods as we are not using them in the policy.
+    // Fail if we encounter any hash fragments. See also translate_hash_clone! macro.
+    translate_hash_fail!(tweak::Key, PublicKey, ());
+}
+
 impl TweakableDescriptor for Descriptor<tweak::Key> {
     fn tweak<C: secp256k1::Verification>(&self, secp: &Secp256k1<C>, contract: &[u8]) -> Self {
-        self.translate_pk(
-            |pk| pk.p2c(secp, &contract[..]),
-            |_h| unimplemented!(),
-        ).unwrap()
+        let mut translator = TweakedKeyTranslator {
+            secp: secp,
+            contract: contract
+        };
+        self.translate_pk(&mut translator).unwrap()
     }
 
     fn iter_signing_keys_threshold(&self) -> (FuncKeyIter, usize) {
-        let policy = self.lift().expect("valid liquid policies are liftable").at_age(0);
+        let policy = self.lift().expect("valid liquid policies are liftable").at_age(bitcoin::Sequence(0));
         if let miniscript::policy::Semantic::Threshold(k, subs) = policy {
             let iter = FuncKeyIter {
                 inner: subs.into_iter(),
@@ -461,13 +498,8 @@ impl TweakableDescriptor for Descriptor<tweak::Key> {
     }
 
     fn to_descriptor_publickey(&self) -> Descriptor<PublicKey> {
-        self.translate_pk(
-            |key| -> Result<_, Infallible> {
-                Ok(*key.as_pubkey())
-            },
-            |_| {
-                unimplemented!()
-            }).unwrap()
+        let mut translator = PublicKeyTranslator;
+        self.translate_pk(&mut translator).unwrap()
     }
 }
 
@@ -479,7 +511,7 @@ pub trait SpendableDescriptor {
 
 impl SpendableDescriptor for Descriptor<tweak::Key> {
     fn can_spend(&self, other: &Self) -> bool {
-        let threshold = match other.lift().unwrap().at_age(0) {
+        let threshold = match other.lift().unwrap().at_age(bitcoin::Sequence(0)) {
             miniscript::policy::Semantic::Threshold(t, _) => t,
             ref other_policy => panic!("descriptor policy «{:?}» at time 0 is not a multisig", other_policy)
         };
@@ -500,24 +532,24 @@ pub struct Cached {
     /// Inner descriptor for watchman-owned coins
     pub inner: Descriptor<tweak::Key>,
     /// witnessScript for the descriptor
-    pub witness_script: bitcoin::Script,
+    pub witness_script: ScriptBuf,
     /// scriptPubKey for the descriptor
-    pub spk: bitcoin::Script,
+    pub spk: ScriptBuf,
     /// Minimum number of signatures we need to combine to sign a transaction
     pub n_required_sigs: usize,
 
     /// CSV-tweaked descriptor for watchman-owned coins
     pub csv_tweaked: Option<Descriptor<tweak::Key>>,
     /// witnessScript for the CSV-tweaked descriptor
-    pub csv_tweaked_witness_script: Option<bitcoin::Script>,
+    pub csv_tweaked_witness_script: Option<ScriptBuf>,
     /// scriptPubKey for the CSV-tweaked descriptor
-    pub csv_tweaked_spk: Option<bitcoin::Script>,
+    pub csv_tweaked_spk: Option<ScriptBuf>,
 }
 
 impl Cached {
     /// Same as [matches], but returns the descriptor,
     /// regular or tweaked, that was matched.
-    pub fn matches(&self, spk: &bitcoin::Script) -> Option<&Descriptor<tweak::Key>> {
+    pub fn matches(&self, spk: &ScriptBuf) -> Option<&Descriptor<tweak::Key>> {
         if *spk == self.spk {
             Some(&self.inner)
         } else if self.csv_tweaked_spk.as_ref().map(|s| s == spk).unwrap_or(false) {
@@ -565,10 +597,6 @@ impl From<Cached> for Descriptor<tweak::Key> {
 
 #[cfg(test)]
 mod tests {
-    use miniscript::Descriptor;
-
-    use std::str::FromStr;
-
     use super::*;
 
     #[test]
@@ -613,7 +641,7 @@ mod tests {
 
         // Output from this code, manually verified
         assert_eq!(
-            desc.explicit_script().unwrap().to_string(),
+            format!("{:?}", desc.explicit_script().unwrap()),
             "Script(\
                 OP_PUSHNUM_11 \
                 OP_PUSHBYTES_33 020e0338c96a8870479f2396c373cc7696ba124e8635d41b0ea581112b67817261 \
@@ -646,7 +674,7 @@ mod tests {
         // Taken from `bitcoin decodescript` on the actual production Liquid script, renamed
         // numbers to `OP_PUSHNUM_` and `OP_CHECKSEQUENCEVERIFY` to `OP_NOP2`
         assert_eq!(
-            desc.liquid_witness_script().to_string(),
+            format!("{:?}", desc.liquid_witness_script()),
             "Script(\
                 OP_DEPTH \
                 OP_PUSHNUM_12 \
@@ -682,29 +710,29 @@ mod tests {
 
         // Also found by just running the code
         assert_eq!(
-            desc.script_pubkey().to_string(),
+            format!("{:?}", desc.script_pubkey()),
             "Script(OP_HASH160 OP_PUSHBYTES_20 37a602781efd839dcc3e6b20877b978141e35c67 OP_EQUAL)",
         );
 
         // Also taken from production, eg
         // 0a6909b2eb793aa895c1cb0ea10bb2b5fbf931af8fea68829aa3339b459f9f83 input 2
         assert_eq!(
-            desc.liquid_script_pubkey().to_string(),
+            format!("{:?}", desc.liquid_script_pubkey()),
             "Script(OP_HASH160 OP_PUSHBYTES_20 9e10aa3d2f248e0e42f9bab31e858240e7ed40e4 OP_EQUAL)",
         );
         assert_eq!(
-            desc.liquid_address().to_string(),
+            format!("{:?}", desc.liquid_address()),
             "3G6neksSBMp51kHJ2if8SeDUrzT8iVETWT"
         );
 
         // Also taken from production, eg
         // 0a6909b2eb793aa895c1cb0ea10bb2b5fbf931af8fea68829aa3339b459f9f83 output 3
         assert_eq!(
-            desc.csv_tweaked_descriptor().liquid_script_pubkey().to_string(),
+            format!("{:?}", desc.csv_tweaked_descriptor().liquid_script_pubkey()),
             "Script(OP_HASH160 OP_PUSHBYTES_20 8ed14f3b870f8d9012c423ec7a76148ba84f6505 OP_EQUAL)",
         );
         assert_eq!(
-            desc.csv_tweaked_descriptor().liquid_address().to_string(),
+            format!("{:?}", desc.csv_tweaked_descriptor().liquid_address()),
             "3EiAcrzq1cELXScc98KeCswGWZaPGceT1d"
         );
     }

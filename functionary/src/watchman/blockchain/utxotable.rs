@@ -66,17 +66,15 @@ use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::{error, hash, fmt, i64, ops};
 
-use bitcoin;
+use bitcoin::Amount;
 use bitcoin::hashes::{Hash, siphash24};
 use bitcoin::secp256k1::{rand, PublicKey};
-use elements;
 
 use common::BlockHeight;
 use common::constants::{CONSTANTS, MAX_PROPOSAL_TOTAL_HSM_PAYLOAD, MAX_PROPOSAL_TX_WEIGHT, MAXIMUM_REQUIRED_INPUTS};
 use descriptor::{LiquidDescriptor, TweakableDescriptor};
 use common::hsm;
 use logs::ProposalError;
-use miniscript::DescriptorTrait;
 use peer;
 use tweak::{self, Tweak};
 use utils;
@@ -91,14 +89,14 @@ pub struct UtxoInfo {
     /// The outpoint of this UTXO
     pub outpoint: bitcoin::OutPoint,
     /// The amount of the output, in satoshis
-    pub value: u64,
+    pub value: Amount,
     /// The block number that this output was confirmed in
     pub height: BlockHeight,
 }
 
 impl UtxoInfo {
     /// Create a new [UtxoInfo].
-    pub fn new(outpoint: bitcoin::OutPoint, value: u64, height: BlockHeight) -> UtxoInfo {
+    pub fn new(outpoint: bitcoin::OutPoint, value: Amount, height: BlockHeight) -> UtxoInfo {
         UtxoInfo {
             outpoint: outpoint,
             value: value,
@@ -123,7 +121,7 @@ impl SpendableUtxo {
     /// Create a new [SpendableUtxo].
     pub fn new(
         outpoint: bitcoin::OutPoint,
-        value: u64,
+        value: Amount,
         height: BlockHeight,
         tweak: Tweak,
         descriptor: miniscript::Descriptor<tweak::Key>,
@@ -185,7 +183,7 @@ impl Utxo {
     /// Create a new spendable [Utxo].
     pub fn new_spendable(
         outpoint: bitcoin::OutPoint,
-        value: u64,
+        value: Amount,
         height: BlockHeight,
         tweak: Tweak,
         descriptor: miniscript::Descriptor<tweak::Key>,
@@ -196,7 +194,7 @@ impl Utxo {
     /// Create a new reclaimable [Utxo].
     pub fn new_reclaimable(
         outpoint: bitcoin::OutPoint,
-        value: u64,
+        value: Amount,
         height: BlockHeight,
         tweak: Tweak,
         descriptor: miniscript::Descriptor<tweak::Key>,
@@ -205,7 +203,7 @@ impl Utxo {
     }
 
     /// Create a new unspendable [Utxo].
-    pub fn new_unspendable(outpoint: bitcoin::OutPoint, value: u64, height: BlockHeight) -> Utxo {
+    pub fn new_unspendable(outpoint: bitcoin::OutPoint, value: Amount, height: BlockHeight) -> Utxo {
         Utxo::Unspendable(UtxoInfo::new(outpoint, value, height))
     }
 
@@ -270,7 +268,7 @@ impl serde::Serialize for Utxo {
     fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
         let ser = SerializedUtxo {
             outpoint: self.outpoint,
-            value: self.value,
+            value: self.value.to_sat(),
             height: self.height,
             tweak: self.spendable().map(|u| u.tweak),
             descriptor: self.spendable().map(|u| Cow::Borrowed(&u.descriptor)),
@@ -284,7 +282,7 @@ impl<'de> serde::Deserialize<'de> for Utxo {
         use serde::de::Error;
 
         let ser = SerializedUtxo::deserialize(d)?;
-        let info = UtxoInfo::new(ser.outpoint, ser.value, ser.height);
+        let info = UtxoInfo::new(ser.outpoint, Amount::from_sat(ser.value), ser.height);
         Ok(if let Some(desc) = ser.descriptor {
             Utxo::Spendable(SpendableUtxo {
                 info: info,
@@ -336,7 +334,7 @@ impl PegoutRequest {
     /// The size in bytes of the tx output to deliver this pegout.
     pub fn txout_size(&self) -> usize {
         let spk_len = self.dest_output.script_pubkey.len();
-        8 + bitcoin::VarInt(spk_len as u64).len() + spk_len
+        8 + bitcoin::VarInt(spk_len as u64).size() + spk_len
     }
 }
 
@@ -522,7 +520,7 @@ impl UtxoTable {
     pub fn main_output_percentiles(
         &self,
         to_exclude: &HashSet<bitcoin::OutPoint>,
-        min_input_amount: u64,
+        min_input_amount: Amount,
     ) -> Option<[u64; 5]> {
         let mut main_utxos = self.main_utxos.clone();
         for out in to_exclude {
@@ -534,10 +532,10 @@ impl UtxoTable {
             return None
         }
 
-        let min = main_utxos[0].1.value;
-        let max = main_utxos[main_utxos.len()-1].1.value;
+        let min = main_utxos[0].1.value.to_sat();
+        let max = main_utxos[main_utxos.len()-1].1.value.to_sat();
         let perc = |perc: f64| -> u64 {
-            main_utxos[((perc as f64/100.0)*main_utxos.len() as f64).ceil() as usize - 1].1.value
+            main_utxos[((perc as f64/100.0)*main_utxos.len() as f64).ceil() as usize - 1].1.value.to_sat()
         };
         return Some([min, perc(25.0), perc(50.0), perc(75.0), max])
     }
@@ -653,11 +651,11 @@ impl UtxoTable {
     pub fn finalize_untweaked_output(
         &mut self,
         txout_ref: bitcoin::OutPoint,
-        value: u64,
+        value: Amount,
         height: BlockHeight,
         descriptor: Option<miniscript::Descriptor<tweak::Key>>,
     ) {
-        slog!(RecordUtxo, utxo: txout_ref, value: value, height: height, claim_script: None);
+        slog!(RecordUtxo, utxo: txout_ref, value: value.to_sat(), height: height, claim_script: None);
 
         let utxo = if let Some(desc) = descriptor {
             Utxo::new_spendable(txout_ref, value, height, Tweak::none(), desc)
@@ -747,12 +745,12 @@ impl UtxoTable {
 
         let utxo = if let Some(desc) = tweaked_descriptor {
             if is_reclamation {
-                Utxo::new_reclaimable(data.outpoint, data.value, mainchain_height, Tweak::some(&tweak[..]), desc)
+                Utxo::new_reclaimable(data.outpoint, Amount::from_sat(data.value), mainchain_height, Tweak::some(&tweak[..]), desc)
             } else {
-                Utxo::new_spendable(data.outpoint, data.value, mainchain_height, Tweak::some(&tweak[..]), desc)
+                Utxo::new_spendable(data.outpoint, Amount::from_sat(data.value), mainchain_height, Tweak::some(&tweak[..]), desc)
             }
         } else {
-            Utxo::new_unspendable(data.outpoint, data.value, mainchain_height)
+            Utxo::new_unspendable(data.outpoint, Amount::from_sat(data.value), mainchain_height)
         };
         self.main_utxos.insert(data.outpoint, utxo);
     }
@@ -777,7 +775,7 @@ impl UtxoTable {
 
         let txout = bitcoin::TxOut {
             script_pubkey: pegout_data.script_pubkey,
-            value: pegout_data.value,
+            value: Amount::from_sat(pegout_data.value),
         };
         if self.pegout_map.contains_key(&side_outpoint) {
             panic!("Tried to process sidechain withdraw {} twice.", side_outpoint);
@@ -939,10 +937,12 @@ impl UtxoTable {
         change_spk: &bitcoin::Script,
     ) {
         let concrete = proposal.to_concrete();
+
+        use bitcoin::ScriptBuf;
         concrete.to_unsigned_tx(
             |outpoint| self.lookup_utxo(outpoint),
             |outpoint| self.lookup_pegout(outpoint),
-            change_spk,
+            &ScriptBuf::from_bytes(change_spk.to_bytes()),
             transaction::FeeCheck::None,
         ).expect("proposal to unsigned tx");
     }
@@ -958,21 +958,21 @@ impl UtxoTable {
         proposal: &mut transaction::Proposal<'utxo, 'pegout>,
         fee_pool: &fee::Pool,
         input_exclude: &HashSet<bitcoin::OutPoint>,
-        economical_amount: u64,
+        economical_amount: Amount,
         current_height: BlockHeight,
         available_signers: &'utxo HashSet<peer::Id>,
     ) -> bool {
         let mut really_critical = false;
         for utxo in self.spendable_utxos(Some(available_signers)) {
             if utxo.value < economical_amount {
-                slog!(IgnoreUneconomicalUtxo, outpoint: utxo.outpoint, value: utxo.value);
+                slog!(IgnoreUneconomicalUtxo, outpoint: utxo.outpoint, value: utxo.value.to_sat());
                 continue;
             }
             if let Some(expiry) = utxo.descriptor.csv_expiry() {
                 if utxo.height + expiry < current_height + CONSTANTS.near_expiry_threshold &&
                     !input_exclude.contains(&utxo.outpoint)
                 {
-                    slog!(UtxoNearExpiry, outpoint: utxo.outpoint, value: utxo.value,
+                    slog!(UtxoNearExpiry, outpoint: utxo.outpoint, value: utxo.value.to_sat(),
                         height: utxo.height, expiry_height: utxo.height + expiry,
                         current_height: current_height
                     );
@@ -1011,7 +1011,7 @@ impl UtxoTable {
             for utxo in self.spendable_utxos(Some(available_signers)) {
                 if &utxo.outpoint == explicitly_selected_utxo &&
                     !input_exclude.contains(&utxo.outpoint) {
-                    slog!(ExplicitlySweepUtxo, outpoint: utxo.outpoint, value: utxo.value,
+                    slog!(ExplicitlySweepUtxo, outpoint: utxo.outpoint, value: utxo.value.to_sat(),
                         height: utxo.height,current_height: current_height
                     );
                     if let Err(e) = proposal.add_input(fee_pool, utxo) {
@@ -1035,7 +1035,7 @@ impl UtxoTable {
         available_signers: &'utxo HashSet<peer::Id>,
     ) {
         for utxo in self.reclaimable_utxos(Some(available_signers)) {
-            slog!(ReclaimFailedPegin, outpoint: utxo.outpoint, value: utxo.value,
+            slog!(ReclaimFailedPegin, outpoint: utxo.outpoint, value: utxo.value.to_sat(),
                 height: utxo.height,current_height: current_height
             );
             if let Err(e) = proposal.add_input(fee_pool, utxo) {
@@ -1074,7 +1074,7 @@ impl UtxoTable {
 
         let min_amount = fee_pool.economical_amount(change_desc.signed_input_weight());
         slog!(StartTxProposal, fee_rate: fee_pool.summary().fee_rate,
-            available_fees: fee_pool.summary().available_funds, economical_amount: min_amount,
+            available_fees: fee_pool.summary().available_funds, economical_amount: min_amount.to_sat(),
             total_n_utxos: self.main_utxos.len(), total_n_pegouts: self.pegout_map.len(),
             in_flight_utxos: input_exclude.len(), in_flight_pegouts: pegout_exclude.len(),
             change_address: bitcoin::Address::from_script(
@@ -1096,14 +1096,14 @@ impl UtxoTable {
         // If we added any, make sure this transaction is completed
         // even if it doesn't wind up processing any pegouts.
         if proposal.n_inputs() > 0 {
-            if really_critical_added || explicit_added || proposal.input_value() >= CONSTANTS.min_sweep_value_sats || proposal.n_inputs() >= MAXIMUM_REQUIRED_INPUTS {
+            if really_critical_added || explicit_added || proposal.input_value().to_sat() >= CONSTANTS.min_sweep_value_sats || proposal.n_inputs() >= MAXIMUM_REQUIRED_INPUTS {
                 fund_even_without_pegouts = true;
             } else {
-                let total_funds = self.spendable_utxos(Some(available_signers)).map(|u| u.value).sum::<u64>();
-                if (proposal.input_value() * 1000) > (total_funds * CONSTANTS.min_sweep_permille) {
+                let total_funds = self.spendable_utxos(Some(available_signers)).map(|u| u.value).sum::<Amount>();
+                if (proposal.input_value().to_sat() * 1000) > (total_funds.to_sat() * CONSTANTS.min_sweep_permille) {
                     fund_even_without_pegouts = true;
                 } else {
-                    slog!(NotSweepingUtxos, value: proposal.input_value(), num_utxos: proposal.n_inputs() as u64, min_sweep_value_sats: CONSTANTS.min_sweep_value_sats, min_sweep_per_mille: CONSTANTS.min_sweep_permille, total_funds);
+                    slog!(NotSweepingUtxos, value: proposal.input_value().to_sat(), num_utxos: proposal.n_inputs() as u64, min_sweep_value_sats: CONSTANTS.min_sweep_value_sats, min_sweep_per_mille: CONSTANTS.min_sweep_permille, total_funds: total_funds.to_sat());
                 }
             }
         }
@@ -1140,6 +1140,7 @@ impl UtxoTable {
             );
         }
 
+        let utxo_count_before_pegouts_serviced = utxos.len();
         let mut utxos_iter = utxos.into_iter();
 
         // 2. Add pegouts
@@ -1195,7 +1196,7 @@ impl UtxoTable {
             ) {
                 Ok(()) => {
                     slog!(IncludingPegout, outpoint: request.request,
-                        value: request.dest_output.value
+                        value: request.dest_output.value.to_sat()
                     );
 
                     total_hsm_payload +=
@@ -1203,13 +1204,13 @@ impl UtxoTable {
                 }
                 Err(blockchain::Error::Hsm(hsm::Error::AuthorizedKeyCacheFull)) => {
                     slog!(IgnoringPegoutHsmFull, outpoint: request.request,
-                        value: request.dest_output.value
+                        value: request.dest_output.value.to_sat()
                     );
                     break;
                 }
                 Err(blockchain::Error::Hsm(err)) => {
                     slog!(IgnoringPegoutBadPak, outpoint: request.request,
-                        value: request.dest_output.value, error: err.to_string()
+                        value: request.dest_output.value.to_sat(), error: err.to_string()
                     );
                     continue;
                 }
@@ -1226,11 +1227,17 @@ impl UtxoTable {
                 }
                 Err(err) => {
                     slog!(IgnoringPegout, outpoint: request.request,
-                        value: request.dest_output.value, error: err.to_string()
+                        value: request.dest_output.value.to_sat(), error: err.to_string()
                     );
                     continue;
                 }
             }
+        }
+
+        let utxo_count_after_pegouts_serviced = utxos_iter.len();
+        let utxo_input_count = utxo_count_before_pegouts_serviced - utxo_count_after_pegouts_serviced;
+        if utxo_input_count > three_quarters_max_inputs {
+            log!(Info, "Overweight mitigation applied: threshold: {}, actual: {}", three_quarters_max_inputs, utxo_input_count);
         }
 
         // The transaction is complete except for change/fee adjustment.
@@ -1274,25 +1281,20 @@ impl UtxoTable {
 mod tests {
     use super::*;
 
-    use std::collections::{HashSet, HashMap};
+    use std::convert::TryFrom;
     use std::fmt::Debug;
+    use std::str::FromStr;
 
-    use bitcoin;
     use bitcoin::blockdata::opcodes;
     use bitcoin::blockdata::script;
     use bitcoin::hashes::hex::FromHex;
-    use bitcoin::hashes::Hash;
     use bitcoin::secp256k1::SecretKey;
     use bitcoin::secp256k1::rand::{thread_rng, Rng, RngCore};
-    use elements;
+    use bitcoin::blockdata::script::PushBytes;
     use elements::encode::deserialize;
-    use jsonrpc::serde_json;
-    use miniscript;
 
-    use common::BlockHeight;
     use watchman::blockchain::{TxIterator, TxObject};
     use watchman::blockchain::tests::{test_descriptor_1, TestSetup};
-    use tweak;
 
     fn random_outpoint() -> bitcoin::OutPoint {
         let mut inp = [0; 32];
@@ -1319,11 +1321,11 @@ mod tests {
 
         (
             txout_ref,
-            Utxo::new_spendable(txout_ref, value, height, tweak, descriptor),
+            Utxo::new_spendable(txout_ref, Amount::from_sat(value), height, tweak, descriptor),
         )
     }
 
-    fn random_pending_withdraw(height: BlockHeight, value: u64) -> (elements::OutPoint, PegoutRequest) {
+    fn random_pending_withdraw(height: BlockHeight, value: Amount) -> (elements::OutPoint, PegoutRequest) {
         let mut inp = [0; 32];
         thread_rng().fill_bytes(&mut inp[..]);
         let txout_ref = elements::OutPoint {
@@ -1332,7 +1334,7 @@ mod tests {
         };
         let script = script::Builder::new()
             .push_opcode(opcodes::all::OP_HASH160)
-            .push_slice(&inp[0..20])
+            .push_slice(<&PushBytes>::try_from(inp[0..20].as_ref()).expect("push bytes"))
             .push_opcode(opcodes::all::OP_EQUAL)
             .into_script();
         let arbitrary_pubkey_vec = Vec::<u8>::from_hex("03a0ff08aa49cf756b592e455dc17567eec56902d2484a7b6f385d3c9dfc6820da").unwrap();
@@ -1376,7 +1378,7 @@ mod tests {
             .collect();
         let requests: Vec<_> = (0..10)
             .map(|_| {
-                let (outpoint, pr) = random_pending_withdraw(100, 5000);
+                let (outpoint, pr) = random_pending_withdraw(100, Amount::from_sat(5000));
                 utxos.pegout_map.insert(outpoint, pr);
                 outpoint
             })
@@ -1387,7 +1389,7 @@ mod tests {
         let mut proposal = transaction::ConcreteProposal {
             inputs: vec![inputs[0], inputs[1], inputs[2]],
             pegouts: vec![requests[0]],
-            change: vec![0],
+            change: vec![Amount::ZERO],
         };
         for _ in 0..3 { // Repeating same tx should be OK
             utxos.record_conflicts(
@@ -1453,7 +1455,7 @@ mod tests {
         let mut bad_proposal = transaction::ConcreteProposal {
             inputs: vec![inputs[5], inputs[6]],
             pegouts: vec![requests[0]],
-            change: vec![0],
+            change: vec![Amount::ZERO],
         };
         if let Err(ProposalError::AttemptedDoubleSpend(x)) =
             utxos.record_conflicts(txid, &bad_proposal.input_set(), bad_proposal.pegouts.iter().copied())
@@ -1503,7 +1505,7 @@ mod tests {
         let c1_proposal = transaction::ConcreteProposal {
             inputs: vec![inputs[0], inputs[7], inputs[8]],
             pegouts: vec![requests[5]],
-            change: vec![0],
+            change: vec![Amount::ZERO],
         };
         utxos.record_conflicts(
             txid, &c1_proposal.input_set(), c1_proposal.pegouts.iter().copied(),
@@ -1512,7 +1514,7 @@ mod tests {
         let c_all_proposal = transaction::ConcreteProposal {
             inputs: vec![inputs[1], inputs[5], inputs[7]],
             pegouts: vec![requests[6]],
-            change: vec![0],
+            change: vec![Amount::ZERO],
         };
         utxos.record_conflicts(
             txid, &c_all_proposal.input_set(), c_all_proposal.pegouts.iter().copied(),
@@ -1554,7 +1556,7 @@ mod tests {
             let random_proposal = transaction::ConcreteProposal {
                 inputs: (0..50).map(|_| random_outpoint()).collect(),
                 pegouts: vec![],
-                change: vec![0],
+                change: vec![Amount::ZERO],
             };
             utxos.clear_conflicts(txid, random_proposal.input_set());
         }
@@ -1631,7 +1633,7 @@ mod tests {
             .collect();
         let requests: Vec<_> = (0..3)
             .map(|_| {
-                let (outpoint, pr) = random_pending_withdraw(100, 5000);
+                let (outpoint, pr) = random_pending_withdraw(100, Amount::from_sat(5000));
                 utxo_template.pegout_map.insert(outpoint, pr);
                 outpoint
             })
@@ -1641,17 +1643,17 @@ mod tests {
             transaction::ConcreteProposal {
                 inputs: vec![inputs[0], inputs[1]],
                 pegouts: vec![requests[0], requests[1]],
-                change: vec![100],
+                change: vec![Amount::from_sat(100)],
             },
             transaction::ConcreteProposal {
                 inputs: vec![inputs[1], inputs[2]],
                 pegouts: vec![requests[1]],
-                change: vec![100, 200],
+                change: vec![Amount::from_sat(100), Amount::from_sat(200)],
             },
             transaction::ConcreteProposal {
                 inputs: vec![inputs[2]],
                 pegouts: vec![requests[2]],
-                change: vec![100, 200, 300],
+                change: vec![Amount::from_sat(100), Amount::from_sat(200), Amount::from_sat(300)],
             },
         ];
 
@@ -1772,11 +1774,11 @@ mod tests {
 
         assert_eq!(utxos.main_utxos.len(), 0);
 
-        let asset_id = elements::AssetId::from_hex("630ed6f9b176af03c0cd3f8aa430f9e7b4d988cf2d0b2f204322488f03b00bf8").unwrap();
+        let asset_id = elements::AssetId::from_str("630ed6f9b176af03c0cd3f8aa430f9e7b4d988cf2d0b2f204322488f03b00bf8").unwrap();
         let mut iter = TxIterator::new(
             &tx,
             tx.txid(),
-            bitcoin::BlockHash::from_hex(
+            bitcoin::BlockHash::from_str(
                 "0f9188f13cb7b2c71f2a335e3a4fc328bf5beb436012afca590b1a11466e2206"
             ).unwrap(),
             elements::confidential::Asset::Explicit(asset_id),
@@ -1791,15 +1793,15 @@ mod tests {
 
         assert_eq!(utxos.main_utxos.len(), 1);
         let main_out_ref = bitcoin::OutPoint {
-            txid: bitcoin::Txid::from_hex("c9d88eb5130365deed045eab11cfd3eea5ba32ad45fa2e156ae6ead5f1fce93f").unwrap(),
+            txid: bitcoin::Txid::from_str("c9d88eb5130365deed045eab11cfd3eea5ba32ad45fa2e156ae6ead5f1fce93f").unwrap(),
             vout: 0,
         };
         assert_eq!(tx.input[0].is_pegin(), true);
-        assert_eq!(tx.input[0].previous_output.txid.as_hash(), main_out_ref.txid.as_hash());
+        assert_eq!(tx.input[0].previous_output.txid.as_raw_hash(), main_out_ref.txid.as_raw_hash());
         assert_eq!(tx.input[0].previous_output.vout, main_out_ref.vout);
 
         let main_utxo = utxos.main_utxos.get(&main_out_ref).unwrap();
-        assert_eq!(main_utxo.value, 100000000);
+        assert_eq!(main_utxo.value.to_sat(), 100000000);
     }
 
     #[test]
@@ -1839,11 +1841,11 @@ mod tests {
         assert_eq!(utxos.reverse_map.len(), 0);
         assert_eq!(utxos.pegout_map.len(), 0);
 
-        let asset_id = elements::AssetId::from_hex("630ed6f9b176af03c0cd3f8aa430f9e7b4d988cf2d0b2f204322488f03b00bf8").unwrap();
+        let asset_id = elements::AssetId::from_str("630ed6f9b176af03c0cd3f8aa430f9e7b4d988cf2d0b2f204322488f03b00bf8").unwrap();
         let mut bad_iter = TxIterator::new(
             &bad_tx_nonnull,
             bad_tx_nonnull.txid(),
-            bitcoin::BlockHash::from_hex(
+            bitcoin::BlockHash::from_str(
                 "0f9188f13cb7b2c71f2a335e3a4fc328bf5beb436012afca590b1a11466e2206"
             ).unwrap(),
             elements::confidential::Asset::Explicit(asset_id),
@@ -1854,7 +1856,7 @@ mod tests {
         let mut bad_iter = TxIterator::new(
             &tx,
             tx.txid(),
-            bitcoin::BlockHash::from_hex(
+            bitcoin::BlockHash::from_str(
                 "00000000000000000000000000000000000000000012afca590b1a11466e2206"
             ).unwrap(),
             elements::confidential::Asset::Explicit(asset_id),
@@ -1862,22 +1864,22 @@ mod tests {
         assert_eq!(None, bad_iter.next());
 
         // Asset ID is wrong
-        let asset_id = elements::AssetId::from_hex("000000000000000000000000000000e7b4d988cf2d0b2f204322488f03b00bf8").unwrap();
+        let asset_id = elements::AssetId::from_str("000000000000000000000000000000e7b4d988cf2d0b2f204322488f03b00bf8").unwrap();
         let mut bad_iter = TxIterator::new(
             &tx,
             tx.txid(),
-            bitcoin::BlockHash::from_hex(
+            bitcoin::BlockHash::from_str(
                 "0f9188f13cb7b2c71f2a335e3a4fc328bf5beb436012afca590b1a11466e2206"
             ).unwrap(),
             elements::confidential::Asset::Explicit(asset_id),
         );
         assert_eq!(None, bad_iter.next());
 
-        let asset_id = elements::AssetId::from_hex("630ed6f9b176af03c0cd3f8aa430f9e7b4d988cf2d0b2f204322488f03b00bf8").unwrap();
+        let asset_id = elements::AssetId::from_str("630ed6f9b176af03c0cd3f8aa430f9e7b4d988cf2d0b2f204322488f03b00bf8").unwrap();
         let mut iter = TxIterator::new(
             &tx,
             tx.txid(),
-            bitcoin::BlockHash::from_hex(
+            bitcoin::BlockHash::from_str(
                 "0f9188f13cb7b2c71f2a335e3a4fc328bf5beb436012afca590b1a11466e2206"
             ).unwrap(),
             elements::confidential::Asset::Explicit(asset_id),
@@ -1899,8 +1901,8 @@ mod tests {
             previous_request: None,
             n_previous_requests: 0,
             dest_output: bitcoin::TxOut {
-                script_pubkey: bitcoin::Script::from(Vec::<u8>::from_hex("76a914bedb324be05d1a1254afeb3e7ef40fea0368bc1e88ac").unwrap()),
-                value: 99993900,
+                script_pubkey: bitcoin::ScriptBuf::from_hex("76a914bedb324be05d1a1254afeb3e7ef40fea0368bc1e88ac").expect("script"),
+                value: Amount::from_sat(99993900),
             },
             height: height,
             dest_pubkey: vec![
@@ -1936,7 +1938,7 @@ mod tests {
         let setup = TestSetup::new(test_descriptor_1());
         let signed_input_weight = setup.descriptor.signed_input_weight();
         let mut utxos = setup.utxotable();
-        let fee_pool = fee::Pool::new(fee::tests::FALLBACK_FEE_RATE);
+        let fee_pool = fee::Pool::new(Amount::from_sat(fee::tests::FALLBACK_FEE_RATE));
         let million = 1000000;
         let (main_ref, main_out) = random_main_utxo(million, 0, setup.descriptor());
         utxos.main_utxos.insert(main_ref, main_out);
@@ -1970,15 +1972,15 @@ mod tests {
         // Build utxoset with outputs with dummy CSV
         let setup = TestSetup::new(test_descriptor_1());
         let mut utxos = setup.utxotable();
-        let mut fee_pool = fee::Pool::new(fee::tests::FALLBACK_FEE_RATE);
-        fee_pool.add(500000);
+        let mut fee_pool = fee::Pool::new(Amount::from_sat(fee::tests::FALLBACK_FEE_RATE));
+        fee_pool.add(Amount::from_sat(500000));
 
         for i in 0..5 {
             let (main_ref, main_out) = random_main_utxo(100000, i, setup.descriptor());
             utxos.main_utxos.insert(main_ref, main_out);
         }
 
-        let script = bitcoin::Script::new();
+        let script = bitcoin::ScriptBuf::new();
         let mut proposal = transaction::Proposal::new(
             &script
         );
@@ -1989,7 +1991,7 @@ mod tests {
         let signers = setup.peers();
         let no_exp = setup.csv() - CONSTANTS.near_expiry_threshold;
         for i in 0..no_exp {
-            utxos.add_critical_inputs(&mut proposal, &fee_pool, &input_exclude, 1, i, &signers);
+            utxos.add_critical_inputs(&mut proposal, &fee_pool, &input_exclude, Amount::ONE_SAT, i, &signers);
             assert_eq!(proposal.n_inputs(), 0);
             proposal = transaction::Proposal::new(
                 &script
@@ -1997,7 +1999,7 @@ mod tests {
         }
 
         for i in 1..5 {
-            utxos.add_critical_inputs(&mut proposal, &fee_pool, &input_exclude, 1, i+no_exp, &signers);
+            utxos.add_critical_inputs(&mut proposal, &fee_pool, &input_exclude, Amount::ONE_SAT, i+no_exp, &signers);
             assert_eq!(proposal.n_inputs(), i as usize);
             proposal = transaction::Proposal::new(
                 &script

@@ -24,7 +24,7 @@ use std::str::FromStr;
 
 use bitcoin::PrivateKey;
 use bitcoin::secp256k1::{SecretKey, PublicKey};
-use miniscript::{Descriptor, TranslatePk};
+use miniscript::{Descriptor, TranslatePk, Translator, translate_hash_fail};
 use serde::{Deserialize, Deserializer};
 use descriptor::{LiquidDescriptor, LiquidSanityCheck, SpendableDescriptor};
 
@@ -118,12 +118,10 @@ pub fn deserialize_hex_bitcoin_tx<'de, D: Deserializer<'de>>(d: D)
     let s = String::deserialize(d)?;
 
     use bitcoin::hashes::hex::FromHex;
-    use bitcoin::consensus::Decodable;
+    use bitcoin::consensus::encode::deserialize;
 
-    let tx_bytes = Vec::<u8>::from_hex(s.as_str())
-        .map_err(|e| Error::custom(e))?;
-    let tx = bitcoin::Transaction::consensus_decode(tx_bytes.as_slice())
-        .map_err(|e| Error::custom(e))?;
+    let tx_bytes = Vec::<u8>::from_hex(&s).map_err(|e| Error::custom(e))?;
+    let tx: bitcoin::Transaction = deserialize(&tx_bytes).map_err(|e| Error::custom(e))?;
     Ok(tx)
 }
 
@@ -131,12 +129,12 @@ pub fn deserialize_hex_bitcoin_tx<'de, D: Deserializer<'de>>(d: D)
 pub fn serialize_bitcoin_tx_hex<S: serde::Serializer>(tx: &bitcoin::Transaction, s: S) -> Result<S::Ok, S::Error> {
     use serde::ser::Error;
     use bitcoin::consensus::Encodable;
-    use bitcoin::hashes::hex::ToHex;
+    use bitcoin::hex::DisplayHex;
 
     let mut tx_bytes: Vec<u8> = Vec::new();
     tx.consensus_encode(&mut tx_bytes).map_err(|e| Error::custom(e))?;
 
-    s.collect_str(&tx_bytes.to_hex())
+    s.collect_str(&tx_bytes.as_hex())
 }
 
 /// Helper function to translate a stringly-typed descriptor into
@@ -152,27 +150,49 @@ pub fn translate_descriptor(
 ) -> miniscript::Descriptor<tweak::Key> {
     let mut dupe_map = HashMap::new();
 
-    let mut res = descriptor.translate_pk::<_, _, ()>(
-        |key| {
-            if let Ok(pk) = PublicKey::from_str(key) {
+    struct KeyTranslator<'a, F> where F: FnMut(&str) -> Option<(peer::Id, PublicKey)> {
+        find_key: &'a mut F,
+        dupe_map: &'a mut HashMap<PublicKey, String>,
+        descriptor: &'a miniscript::Descriptor<String>,
+    }
+
+    impl<'a, F> Translator<String, tweak::Key, ()> for KeyTranslator<'a, F>
+    where
+        F: FnMut(&str) -> Option<(peer::Id, PublicKey)>,
+    {
+        fn pk(&mut self, pk: &String) -> Result<tweak::Key, ()> {
+            if let Ok(pk) = PublicKey::from_str(pk) {
                 Ok(tweak::Key::Untweakable(pk))
             } else {
-                if let Some((peer_id, signing_key)) = find_key(key) {
+                if let Some((peer_id, signing_key)) = (self.find_key)(pk) {
                     // Store the whole key in the duplicate map, and link to its
                     // name, so we can provide a more helpful error message when
                     // sort-checking below
-                    if dupe_map.insert(signing_key, key.to_owned()).is_none() {
-                        log!(Debug, "inserted functionary/key «{}» ({}) in {}", key, signing_key, descriptor);
+                    if self.dupe_map.insert(signing_key, pk.to_owned()).is_none() {
+                        log!(Debug, "inserted functionary/key «{}» ({}) in {}", pk, signing_key, self.descriptor);
                         Ok(tweak::Key::Tweakable(peer_id, signing_key))
                     } else {
-                        panic!("duplicate functionary/key «{}» ({}) in {}", key, signing_key, descriptor)
+                        panic!("duplicate functionary/key «{}» ({}) in {}", pk, signing_key, self.descriptor)
                     }
                 } else {
-                    panic!("unrecognized functionary/key «{}» in {}", key, descriptor)
+                    panic!("unrecognized functionary/key «{}» in {}", pk, self.descriptor)
                 }
             }
-        },
-        |_hash| unimplemented!(),
+        }
+
+        // We don't need to implement these methods as we are not using them in the policy.
+        // Fail if we encounter any hash fragments. See also translate_hash_clone! macro.
+        translate_hash_fail!(String, tweak::Key, ());
+    }
+
+    let mut pk_translator = KeyTranslator {
+        find_key: &mut find_key,
+        dupe_map: &mut dupe_map,
+        descriptor: &descriptor,
+    };
+
+    let mut res = descriptor.translate_pk::<_, _>(
+        &mut pk_translator
     ).expect(&format!("parse keys in descriptor {}", descriptor));
 
     if let Some((_, _, keys)) = res.legacy_liquid_descriptor_components() {
@@ -181,6 +201,32 @@ pub fn translate_descriptor(
         // nb `keys_sorted.sort()` does not do the right thing, which arguably is a rust-bitcoin bug
         keys_sorted.sort_by_cached_key(|key| key.serialize().to_vec());
         if keys != keys_sorted {
+
+            struct ResortTranslator<'a, F> where F: FnMut(&str) -> Option<(peer::Id, PublicKey)> {
+                find_key: &'a mut F,
+                dupe_map: &'a mut HashMap<PublicKey, String>,
+                keys: &'a [PublicKey],
+                keys_sorted: &'a [PublicKey],
+            }
+
+
+            impl<'a, F> Translator<String, String, ()> for ResortTranslator<'a, F>
+            where
+                F: FnMut(&str) -> Option<(peer::Id, PublicKey)>,
+            {
+                fn pk(&mut self, pk: &String) -> Result<String, ()> {
+                    if PublicKey::from_str(pk).is_ok() {
+                        Ok(pk.clone())
+                    } else {
+                        let peer_key = (self.find_key)(pk).unwrap().1;
+                        let kpos = self.keys.iter().position(|targ| *targ == peer_key).unwrap();
+                        let new_peer_key = self.keys_sorted[kpos];
+                        Ok(self.dupe_map.remove(&new_peer_key).unwrap())
+                    }
+                }
+
+                translate_hash_fail!(String, String, ());
+            }
             // If there is an order mismatch, construct a correctly-ordered descriptor
             // so we can output this to the user, saving them the time of hex-sorting
             // the keys themselves.
@@ -188,30 +234,37 @@ pub fn translate_descriptor(
             // We use Descriptor::translate_pk for this; for each key, we look up its
             // index in the unsorted array, use the same index in the sorted array,
             // and return that key
-            let resorted = descriptor.translate_pk::<_, _, ()>(
-                |peer_name| {
-                    if PublicKey::from_str(peer_name).is_ok() {
-                        Ok(peer_name.to_owned())
-                    } else {
-                        let peer_key = find_key(peer_name).unwrap().1;
-                        let kpos = keys.iter().position(|targ| *targ == peer_key).unwrap();
-                        let new_peer_key = keys_sorted[kpos];
-                        Ok(dupe_map.remove(&new_peer_key).unwrap())
-                    }
-                },
-                |_hash| unimplemented!(),
+            let mut translator = ResortTranslator {
+                find_key: &mut find_key,
+                dupe_map: &mut dupe_map,
+                keys: &keys,
+                keys_sorted: &keys_sorted,
+            };
+            let resorted = descriptor.translate_pk::<_, _>(
+                &mut translator
             ).expect(&format!("reordering descriptor {}", descriptor));
             slog!(BadDescriptorOrder, bad_descriptor: descriptor.to_string(), reordered: resorted.to_string());
         }
     } else {
+        struct TweakTranslator;
+
+        impl Translator<tweak::Key, tweak::Key, ()> for TweakTranslator {
+            fn pk(&mut self, key: &tweak::Key) -> Result<tweak::Key, ()> {
+                match key {
+                    tweak::Key::Untweakable(k) => Ok(tweak::Key::NonFunctionary(*k)),
+                    x => Ok(*x),
+                }
+            }
+
+            translate_hash_fail!(tweak::Key, tweak::Key, ());
+        }
+
+        let mut translator = TweakTranslator;
+
         // Outside of legacy applications (i.e. post-dynafed), all `Untweakable`
         // keys should actually be `NonFunctionary` keys
-        res = res.translate_pk::<_, _, ()>(
-            |key| match *key {
-                tweak::Key::Untweakable(k) => Ok(tweak::Key::NonFunctionary(k)),
-                x => Ok(x),
-            },
-            |_hash| unimplemented!(),
+        res = res.translate_pk::<_, _>(
+            &mut translator
         ).expect("marking non-functionary keys as tweakable");
     }
 

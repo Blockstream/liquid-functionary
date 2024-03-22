@@ -36,17 +36,14 @@ use std::collections::{HashSet, HashMap};
 use std::io::Read;
 use std::time::{Duration, Instant, SystemTime};
 
-use bitcoin;
 use bitcoin::consensus::Encodable;
 use bitcoin::hashes::Hash;
-use bitcoin::OutPoint;
+use bitcoin::{Amount, OutPoint};
 use bitcoin::secp256k1::{self, PublicKey, Secp256k1};
 use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
+use elements::confidential::Asset;
 use common::blockchain::extract_commitment;
-use elements;
 use elements::PeginData;
-use jsonrpc;
-use time;
 
 use common::{constants, rollouts, BlockHeight, PeerId};
 use descriptor::{self, LiquidDescriptor, TweakableDescriptor};
@@ -304,7 +301,7 @@ impl<'tx> Iterator for TxIterator<'tx> {
                 // we are trusting the consensus code to reject any such inputs
                 // if they don't correspond to a valid yet-unused Bitcoin output
                 if let Some(data) = input.pegin_data() {
-                    if data.genesis_hash == self.genesis_hash && data.asset == self.pegged_asset {
+                    if data.genesis_hash == self.genesis_hash && Asset::Explicit(data.asset) == self.pegged_asset {
                         return Some(TxObject::Pegin(data));
                     }
                 }
@@ -354,8 +351,8 @@ impl<'tx> Iterator for TxIterator<'tx> {
 pub fn extract_mainchain_commitment<'a>(block: &'a elements::Block) -> Option<bitcoin::BlockHash> {
     let func = |script: &'a [u8], header: &'a [u8]| {
         if script.len() == 1 + 1 + 4 + 32
-            && script[0] == bitcoin::blockdata::opcodes::all::OP_RETURN.into_u8()
-            && script[1] == bitcoin::blockdata::opcodes::all::OP_PUSHBYTES_36.into_u8()
+            && script[0] == bitcoin::blockdata::opcodes::all::OP_RETURN.to_u8()
+            && script[1] == bitcoin::blockdata::opcodes::all::OP_PUSHBYTES_36.to_u8()
             && &script[2..6] == header
         {
             Some(&script[6..])
@@ -403,7 +400,7 @@ pub struct Manager {
     /// Tracking iterator for the sidechain height
     side_height_iter: HeightIterator,
     /// The latest observed mainchain commitment on the sidechain.
-    #[serde(default)]
+    #[serde(default = "default_mainchain_commitment")]
     latest_mainchain_commitment: (BlockHeight, bitcoin::BlockHash),
     /// Hash of the genesis block of the mainchain
     genesis_hash: bitcoin::BlockHash,
@@ -422,10 +419,14 @@ pub struct Manager {
     cache_file: String,
 }
 
+fn default_mainchain_commitment() -> (BlockHeight, bitcoin::BlockHash) {
+    (BlockHeight::default(), bitcoin::BlockHash::all_zeros())
+}
+
 impl Manager {
     /// Creates a new empty `blockchain::Manager`
     pub fn new(
-        fallback_fee_rate: u64,
+        fallback_fee_rate: Amount,
         main_skip_height: BlockHeight,
         target_n_outputs: usize,
         our_public_key: PublicKey,
@@ -446,7 +447,7 @@ impl Manager {
                 1,  // start from genesis of sidechain
                 constants::SIDECHAIN_CONFIRMS,
             ),
-            latest_mainchain_commitment: Default::default(),
+            latest_mainchain_commitment: (Default::default(), bitcoin::BlockHash::all_zeros()),
             genesis_hash: sidechain_info.parent_genesis,
             pegged_asset: elements::confidential::Asset::Explicit(sidechain_info.pegged_asset),
             target_n_outputs: target_n_outputs,
@@ -469,11 +470,11 @@ impl Manager {
 
     /// Validate and fix available_funds based on non_user_funds and docked_fees
     pub fn fix_available_funds(&mut self) {
-        let mut real_available_funds = self.account.non_user_funds() as i64;
-        real_available_funds -= self.fee_pool.temporarily_docked() as i64;
+        let mut real_available_funds = self.account.non_user_funds().to_signed().expect("signed overflow");
+        real_available_funds -= self.fee_pool.temporarily_docked().to_signed().expect("overflow");
         if self.fee_pool.available_funds() != real_available_funds {
             log!(Error, "Available funds doesn't match: {} vs {}", real_available_funds, self.fee_pool.available_funds());
-            self.fee_pool.set(real_available_funds);
+            self.fee_pool.set(real_available_funds.to_sat());
         }
     }
 
@@ -554,7 +555,7 @@ impl Manager {
 
         // At this point we know we have a federation tx, so let's make sure
         // we know all the inputs.
-        let mut input_value = 0;
+        let mut input_value = Amount::ZERO;
         let mut unknown_inputs = Vec::with_capacity(tx.input.len());
         for input in &tx.input {
             if let Some(utxo) = self_utxos.lookup_utxo(&input.previous_output) {
@@ -610,7 +611,7 @@ impl Manager {
         }
 
         // Check/dock fees
-        let output_value = tx.output.iter().map(|o| o.value).sum::<u64>();
+        let output_value = tx.output.iter().map(|o| o.value).sum::<Amount>();
         let fee = input_value - output_value;
         self_feepool.temporarily_dock_tx(tx, fee);
 
@@ -636,8 +637,8 @@ impl Manager {
                 let input_value = tx.tx.input
                     .iter()
                     .map(|i| self_utxos.lookup_utxo(&i.previous_output).expect("canonical").value)
-                    .sum::<u64>();
-                let output_value = tx.tx.output.iter().map(|out| out.value).sum::<u64>();
+                    .sum::<Amount>();
+                let output_value = tx.tx.output.iter().map(|out| out.value).sum::<Amount>();
                 input_value.checked_sub(output_value).expect("canonical")
             };
             self_fee_pool.temporarily_dock_tx(&tx.tx, fee);
@@ -731,8 +732,8 @@ impl Manager {
 
                         let discrepancy = account.discrepancy();
                         if last_discrepancy != discrepancy {
-                            slog!(DiscrepancyChanged, txid: txid.as_hash(), old_discrepancy: last_discrepancy,
-                                discrepancy: discrepancy, bitcoin_txid: Some(txid), elements_txid: None
+                            slog!(DiscrepancyChanged, txid: txid.to_raw_hash(), old_discrepancy: last_discrepancy.to_sat(),
+                                discrepancy: discrepancy.to_sat(), bitcoin_txid: Some(txid), elements_txid: None
                             );
                             last_discrepancy = discrepancy;
                         }
@@ -774,7 +775,7 @@ impl Manager {
                 TxObject::Pegin(data) => {
                     match mainchain_block_height(data.referenced_block, bitcoind) {
                         Ok(main_height) => {
-                            self.account.pegin(data.outpoint, txid, data.value);
+                            self.account.pegin(data.outpoint, txid, Amount::from_sat(data.value));
                             let tx = bitcoin::consensus::deserialize::<bitcoin::Transaction>(
                                 data.tx
                             ).expect("invalid pegin data: invalid mainchain tx");
@@ -807,16 +808,16 @@ impl Manager {
                     // to be processed as pegouts (fixes #220)
                     if self.consensus.lookup_spk(&data.script_pubkey).is_ours() {
                         slog!(PegoutToFederation, outpoint: side_outpoint, value: data.value);
-                        self.account.fee_burn(side_outpoint, data.value);
-                        self.fee_pool.add(data.value);
+                        self.account.fee_burn(side_outpoint, Amount::from_sat(data.value));
+                        self.fee_pool.add(Amount::from_sat(data.value));
                     } else {
                         pegouts.push((side_outpoint, data));
                     }
                 },
                 TxObject::Donation(side_outpoint, value) => {
                     if value > 0 {
-                        self.account.fee_burn(side_outpoint, value);
-                        self.fee_pool.add(value);
+                        self.account.fee_burn(side_outpoint, Amount::from_sat(value));
+                        self.fee_pool.add(Amount::from_sat(value));
                     }
                 },
                 TxObject::Fee(fee) => {
@@ -833,7 +834,7 @@ impl Manager {
                     outpoint,
                     bitcoin::TxOut {
                         script_pubkey: data.script_pubkey.clone(),
-                        value: data.value,
+                        value: Amount::from_sat(data.value),
                     },
                 );
 
@@ -986,8 +987,8 @@ impl Manager {
                     let discrepancy = self.account.discrepancy();
                     let txid = tx.txid();
                     if last_discrepancy != discrepancy {
-                        slog!(DiscrepancyChanged, txid: txid.as_hash(), old_discrepancy: last_discrepancy,
-                            discrepancy: discrepancy, elements_txid: Some(txid), bitcoin_txid: None
+                        slog!(DiscrepancyChanged, txid: txid.to_raw_hash(), old_discrepancy: last_discrepancy.to_sat(),
+                            discrepancy: discrepancy.to_sat(), elements_txid: Some(txid), bitcoin_txid: None
                         );
                         last_discrepancy = discrepancy;
                     }
@@ -1106,16 +1107,16 @@ impl Manager {
 
                 match self.utxos.lookup_utxo(&outpoint) {
                     None => {
-                        slog!(AddedFailedPegin, outpoint, value: output.value);
+                        slog!(AddedFailedPegin, outpoint, value: output.value.to_sat());
                         let pegin_data = PeginData {
                             outpoint: outpoint,
-                            value: output.value,
+                            value: output.value.to_sat(),
                             asset: Default::default(),
-                            genesis_hash: Default::default(),
+                            genesis_hash: bitcoin::BlockHash::all_zeros(),
                             claim_script: failed_pegin_tx.claim_script.as_bytes(),
                             tx: tx_bytes.as_slice(),
                             merkle_proof: &[],
-                            referenced_block: Default::default(),
+                            referenced_block: bitcoin::BlockHash::all_zeros(),
                         };
 
                         self.utxos.finalize_pegin(pegin_data, block_height, Some(descriptor), true);
@@ -1327,7 +1328,7 @@ impl Manager {
         )?;
         let concrete = proposal.to_concrete();
         slog!(CompleteProposal, inputs: &concrete.inputs, pegouts: &concrete.pegouts,
-            change: &concrete.change, fee: proposal.input_value() - proposal.output_value()
+            change: concrete.change.iter().map(|c| c.to_sat()).collect::<Vec<_>>().as_slice(), fee: (proposal.input_value() - proposal.output_value()).to_sat()
         );
         Ok(concrete)
     }
@@ -1344,7 +1345,7 @@ impl Manager {
              transaction::FeeCheck::Validate(&self.fee_pool),
         )?;
         let mut without_scriptsigs = tx.clone();
-        without_scriptsigs.input.iter_mut().for_each(|i| i.script_sig = bitcoin::Script::new());
+        without_scriptsigs.input.iter_mut().for_each(|i| i.script_sig = bitcoin::ScriptBuf::new());
         let input_map = inputs.iter().map(|i| (i.outpoint, i)).collect::<HashMap<_, _>>();
         let weight = transaction::ConcreteProposal::signed_weight(&without_scriptsigs, &input_map);
         assert!(weight <= constants::MAX_PROPOSAL_TX_WEIGHT);
@@ -1376,7 +1377,7 @@ impl Manager {
         };
 
         slog!(ValidateProposal, inputs: &proposal.inputs, pegouts: &proposal.pegouts,
-            change: &proposal.change, change_spk: change_spk,
+            change: &proposal.change.iter().map(|c| c.to_sat()).collect::<Vec<_>>().as_slice(), change_spk: change_spk,
             change_address: bitcoin::Address::from_script(
                 change_spk, bitcoin::Network::Bitcoin,
             ).expect("invalid change spk"),
@@ -1455,7 +1456,7 @@ impl Manager {
     }
 
     /// Total change of the in-flight pegout transactions.
-    pub fn total_in_flight_change(&self) -> u64 {
+    pub fn total_in_flight_change(&self) -> Amount {
         self.in_flight_txs().map(|(_, tx)| tx.iter_change()).flatten().map(|o| o.value).sum()
     }
 
@@ -1477,8 +1478,8 @@ impl Manager {
 
     /// Return the total input value of pending transactions
     /// and the total change value of pending transactions.
-    pub fn pending_funds(&self) -> (u64, u64) {
-        let mut total_inputs = 0;
+    pub fn pending_funds(&self) -> (Amount, Amount) {
+        let mut total_inputs = Amount::ZERO;
         // Iterate over in-flight inputs and add their values.
         for outpoint in self.in_flight_inputs().iter() {
             if let Some(utxo) = self.lookup_utxo(outpoint) {
@@ -1539,9 +1540,9 @@ impl Manager {
     ) {
         let mut n_pending_txs = 0;
         let mut n_pending_txs_sweeponly = 0;
-        let mut pending_change_value = 0;
-        let mut pending_donation_value = 0;
-        let mut pending_input_value = 0;
+        let mut pending_change_value = Amount::ZERO;
+        let mut pending_donation_value = Amount::ZERO;
+        let mut pending_input_value = Amount::ZERO;
         let mut ongoing_pegouts = HashSet::new();
         let mut ongoing_inputs = HashSet::new();
         for (_, tx) in self.in_flight_txs() {
@@ -1550,8 +1551,8 @@ impl Manager {
                 n_pending_txs_sweeponly += 1;
             }
 
-            pending_change_value += tx.iter_change().map(|o| o.value).sum::<u64>();
-            pending_donation_value += tx.iter_donations().map(|o| o.value).sum::<u64>();
+            pending_change_value += tx.iter_change().map(|o| o.value).sum::<Amount>();
+            pending_donation_value += tx.iter_donations().map(|o| o.value).sum::<Amount>();
             ongoing_pegouts.extend(tx.iter_pegouts());
 
             if tx.is_federation_tx() {
@@ -1586,10 +1587,10 @@ impl Manager {
             n_inputs_pending: output_counter.pending_inputs(),
             n_output_projected: output_counter.projection(),
             available_output_percentiles: self.available_output_percentiles().unwrap_or_default(),
-            pending_input_value: pending_input_value,
-            pending_output_value: pending_change_value + pending_donation_value,
-            pending_change_value: pending_change_value,
-            pending_donation_value: pending_donation_value,
+            pending_input_value: pending_input_value.to_sat(),
+            pending_output_value: (pending_change_value + pending_donation_value).to_sat(),
+            pending_change_value: pending_change_value.to_sat(),
+            pending_donation_value: pending_donation_value.to_sat(),
         );
 
         return (ongoing_pegouts, ongoing_inputs, output_counter);
@@ -1659,27 +1660,23 @@ impl Manager {
 
 #[cfg(test)]
 pub mod tests {
-    use std::default::Default;
     use std::{panic, time};
     use std::str::FromStr;
 
-    use bitcoin;
-    use bitcoin::hashes::hex::{FromHex, ToHex};
-    use bitcoin::hashes::{Hash, sha256d};
+    use bitcoin::absolute::LockTime;
+    use bitcoin::hashes::sha256d;
+    use bitcoin::{CompactTarget, ScriptBuf, SignedAmount};
     use elements::AssetId;
+    use elements::dynafed::FullParams;
     use elements::encode::deserialize;
-    use jsonrpc;
-    use miniscript::{self, Descriptor};
+    use miniscript::Descriptor;
 
     use super::*;
 
-    use common::constants;
     use common::constants::Constants;
-    use descriptor::{LiquidDescriptor, TweakableDescriptor};
     use tweak;
-    use utils::BlockRef;
+    use utils::{BlockRef, empty_elements_block};
     use rpc::Rpc;
-    use watchman::transaction;
 
     /// Bitcoin genesis hash
     pub const BITCOIN_GENESIS_STR: &'static str = "000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f";
@@ -1848,13 +1845,13 @@ pub mod tests {
     fn single_desc_consensus(desc: miniscript::Descriptor<tweak::Key>) -> ConsensusTracker {
         let mut ret = ConsensusTracker::new(10);
         ret.update_known_descriptors(vec![(0, descriptor::Cached::from(desc.clone()))]);
-        ret.register_sidechain_block(1, Some(1), Some(&elements::dynafed::Params::Full {
-            signblockscript: elements::Script::new(),
-            signblock_witness_limit: 0,
-            fedpeg_program: desc.liquid_script_pubkey(),
-            fedpegscript: desc.liquid_witness_script().to_bytes(),
-            extension_space: vec![],
-        }));
+        ret.register_sidechain_block(1, Some(1), Some(&elements::dynafed::Params::Full(FullParams::new(
+            elements::Script::new(),
+            0,
+            desc.liquid_script_pubkey(),
+            desc.liquid_witness_script().to_bytes(),
+            vec![],
+        ))));
         assert_eq!(ret.active_params().expect("no params").descriptor.as_ref().expect("no desc").inner, desc);
         ret
     }
@@ -1892,17 +1889,17 @@ pub mod tests {
 
             let main_skip_height = 470000;
             let n_mainchain_confirms = 20;
-            let asset_id = elements::AssetId::from_hex(LBTC_ASSET).unwrap();
+            let asset_id = elements::AssetId::from_str(LBTC_ASSET).unwrap();
             Manager {
                 secp: Secp256k1::verification_only(),
                 consensus: consensus,
                 txindex: txindex::TxIndex::new(main_skip_height, n_mainchain_confirms),
                 account: Account::new(),
-                fee_pool: fee::Pool::new(20000),
+                fee_pool: fee::Pool::new(Amount::from_sat(20000)),
                 utxos: self.utxotable(),
                 side_height_iter: HeightIterator::new(1, 2),
-                latest_mainchain_commitment: Default::default(),
-                genesis_hash: bitcoin::BlockHash::from_hex(BITCOIN_GENESIS_STR).unwrap(),
+                latest_mainchain_commitment: (0, bitcoin::BlockHash::all_zeros()),
+                genesis_hash: bitcoin::BlockHash::from_str(BITCOIN_GENESIS_STR).unwrap(),
                 pegged_asset: elements::confidential::Asset::Explicit(asset_id),
                 target_n_outputs: 100,
                 last_confirmed_hash: None,
@@ -1918,16 +1915,16 @@ pub mod tests {
         /// Fee donation of 2^36 sat (~687 BTC) to the test descriptor.
         pub fn main_tx_donation(&self) -> bitcoin::Transaction {
             bitcoin::Transaction {
-                version: 1,
-                lock_time: 0,
+                version: bitcoin::transaction::Version::ONE,
+                lock_time: bitcoin::absolute::LockTime::ZERO,
                 input: vec![bitcoin::TxIn {
                     previous_output: "5426c3899d136c5c398045e694b0c01052b990d5bf903ecc0eeeb919b0c1237f:1".parse().unwrap(),
-                    script_sig: "47304402202be21fff8b3afb4b30a8f844ac3098f9b08b8b7545278d31c689dffa4f00186002207b39c703ede9f94118e27c9d979b7a55b485fbab89f3a2111f23884c90775cda012102cb202b000dde09b96dfffd672616aa3235fed9d34399ecfb63a2581b0e17340b".parse().unwrap(),
-                    sequence: 4294967295,
+                    script_sig: ScriptBuf::from_hex("47304402202be21fff8b3afb4b30a8f844ac3098f9b08b8b7545278d31c689dffa4f00186002207b39c703ede9f94118e27c9d979b7a55b485fbab89f3a2111f23884c90775cda012102cb202b000dde09b96dfffd672616aa3235fed9d34399ecfb63a2581b0e17340b").unwrap(),
+                    sequence: bitcoin::Sequence::from_consensus(4294967295),
                     witness: bitcoin::Witness::default(),
                 }],
                 output: vec![bitcoin::TxOut {
-                    value: 68719476736,
+                    value: Amount::from_sat(68719476736),
                     script_pubkey: self.descriptor().liquid_script_pubkey(),
                 }],
             }
@@ -1963,30 +1960,16 @@ pub mod tests {
     }
     impl rpc::BitcoinRpc for DummyBitcoind {}
 
-    /// Create a pegin witness.
-    /// NB Can be replaced with the rust-elements method once released:
-    /// https://github.com/ElementsProject/rust-elements/pull/144
-    fn craft_pegin_witness(pegin_data: &elements::PeginData) -> Vec<Vec<u8>> {
-        vec![
-            bitcoin::consensus::serialize(&pegin_data.value),
-            elements::encode::serialize(&pegin_data.asset.explicit().unwrap()),
-            bitcoin::consensus::serialize(&pegin_data.genesis_hash),
-            pegin_data.claim_script.to_vec(),
-            pegin_data.tx.to_vec(),
-            pegin_data.merkle_proof.to_vec(),
-        ]
-    }
-
     fn craft_pegin_tx(wm_desc: &Descriptor<tweak::Key>, pegin_values: &[u64]) -> elements::Transaction {
         // chosen randomly 20 bytes
         let claim_script = hex!("dd918c8d61810546e69f05951fef4fcda95ab4f0");
         let lock_tx = bitcoin::Transaction {
-            version: 0,
-            lock_time: 0,
+            version: bitcoin::transaction::Version::non_standard(0),
+            lock_time: LockTime::ZERO,
             input: vec![],
             output: pegin_values.iter().map(|value| {
                 bitcoin::TxOut {
-                    value: *value,
+                    value: Amount::from_sat(*value),
                     script_pubkey: wm_desc
                         .tweak(&secp256k1::Secp256k1::new(), &claim_script[..])
                         .liquid_script_pubkey()
@@ -2000,7 +1983,7 @@ pub mod tests {
             elements::PeginData {
                 outpoint: bitcoin::OutPoint::new(lock_txid, i as u32),
                 value: *value,
-                asset: elements::confidential::Asset::Explicit(LBTC_ASSET.parse().unwrap()),
+                asset: AssetId::from_str(LBTC_ASSET).unwrap(),
                 genesis_hash: BITCOIN_GENESIS_STR.parse().unwrap(),
                 claim_script: &claim_script[..],
                 tx: &lock_tx_serialized,
@@ -2010,17 +1993,16 @@ pub mod tests {
         });
         let ret = elements::Transaction {
             version: 2,
-            lock_time: 0,
+            lock_time: elements::LockTime::ZERO,
             input: pegin_datas.clone().map(|pegin| {
                 elements::TxIn {
                     previous_output: pegin.outpoint.to_string().parse().unwrap(),
                     is_pegin: true,
-                    has_issuance: false,
                     script_sig: elements::Script::new(),
-                    sequence: 4294967295,
+                    sequence: elements::Sequence::from_consensus(4294967295),
                     asset_issuance: Default::default(),
                     witness: elements::TxInWitness {
-                        pegin_witness: craft_pegin_witness(&pegin),
+                        pegin_witness: pegin.to_pegin_witness(),
                         ..Default::default()
                     },
                 }
@@ -2070,7 +2052,7 @@ pub mod tests {
         }
 
         // Zero change will be rejected for having too small change
-        proposal.change.push(0);
+        proposal.change.push(Amount::ZERO);
         let res = manager.validate_proposal(&proposal, |_| Ok(()), false);
         if let Err(Error::BadProposal(
             ProposalError::BadChangeAmount { got, min }
@@ -2085,7 +2067,7 @@ pub mod tests {
         let value = 1000000;
         let pegin_tx = craft_pegin_tx(&setup.descriptor(), &[value]);
 
-        proposal.change[0] = constants::MINIMUM_DUST_CHANGE;
+        proposal.change[0] = Amount::from_sat(constants::MINIMUM_DUST_CHANGE);
         proposal.inputs.push(pegin_tx.input[0].pegin_data().expect("pegin tx").outpoint);
 
         let res = manager.validate_proposal(&proposal, |_| Ok(()), false);
@@ -2124,7 +2106,7 @@ pub mod tests {
         serialization_roundtrip(&manager);
 
         // If we add a sane change output, it will go through
-        proposal.change[0] = 990_000;
+        proposal.change[0] = Amount::from_sat(990_000);
         manager.validate_proposal(&proposal, |_| Ok(()), false).expect("prepare ok");
 
         // Attempt an actual pegout
@@ -2156,12 +2138,12 @@ pub mod tests {
         }
 
         // Shrink the change output to make room for the pegout
-        proposal.change[0] = 899000;
+        proposal.change[0] = Amount::from_sat(899000);
         let res = manager.validate_proposal(&proposal, |_| Ok(()), false);
         assert!(res.is_ok());
 
         // Trying to process the same output twice in one shot will cause an error
-        proposal.change[0] = 798000; // make room for more outputs + fee
+        proposal.change[0] = Amount::from_sat(798000); // make room for more outputs + fee
         let copy = proposal.pegouts[0];
         proposal.pegouts.push(copy);
         let res = manager.validate_proposal(&proposal, |_| Ok(()), false);
@@ -2172,7 +2154,7 @@ pub mod tests {
         }
 
         let discrepancy = manager.account.discrepancy();
-        assert_eq!(discrepancy, 0);
+        assert_eq!(discrepancy.to_sat(), 0);
         serialization_roundtrip(&manager);
     }
 
@@ -2186,7 +2168,7 @@ pub mod tests {
     ) {
         if let Some(meta) = man.self_tx_meta(tx).expect("tx_meta error") {
             // I don't think anything cares about the block hash for now..
-            let status =  txindex::TxStatus::ConfirmedIn(BlockRef::new(target_mainchain_height, Default::default()));
+            let status =  txindex::TxStatus::ConfirmedIn(BlockRef::new(target_mainchain_height, bitcoin::BlockHash::all_zeros()));
             let tx = txindex::tests::new_tx(tx.clone(), status, meta);
             man.txindex.insert_dummy_blocks_until(target_mainchain_height);
             man.consensus.register_sidechain_block(last_sidechain_height, Some(target_mainchain_height + 1), None);
@@ -2230,7 +2212,7 @@ pub mod tests {
             pegout_ref1 = side_ref;
             pegout_out1 = bitcoin::TxOut {
                 script_pubkey: pegout_data.script_pubkey.clone(),
-                value: pegout_data.value,
+                value: Amount::from_sat(pegout_data.value),
             };
         } else {
             panic!("expected pegout");
@@ -2244,7 +2226,7 @@ pub mod tests {
             pegout_ref2 = side_ref;
             pegout_out2 = bitcoin::TxOut {
                 script_pubkey: pegout_data.script_pubkey.clone(),
-                value: pegout_data.value,
+                value: Amount::from_sat(pegout_data.value),
             };
         } else {
             panic!("expected pegout");
@@ -2263,7 +2245,7 @@ pub mod tests {
         let mut proposal = transaction::ConcreteProposal {
             inputs: vec![pegin_out],
             pegouts: vec![pegout_ref1, pegout_ref2],
-            change: vec![790000],
+            change: vec![Amount::from_sat(790000)],
         };
 
         let manager_copy = manager.clone();
@@ -2271,27 +2253,27 @@ pub mod tests {
         // Sign the tx
         let tx = manager.validate_proposal(&proposal, |_| Ok(()), false).unwrap().0;
         let discrepancy = manager.account.discrepancy();
-        assert_eq!(discrepancy, 0);
+        assert_eq!(discrepancy.to_sat(), 0);
 
         // Confirm the tx
         process_main_transaction(&mut manager, &tx, 1, 1);
         let discrepancy = manager.account.discrepancy();
-        assert_eq!(discrepancy, 0);
+        assert_eq!(discrepancy.to_sat(), 0);
 
         // Try without marking signed first
         manager = manager_copy.clone();
         process_main_transaction(&mut manager, &tx, 1, 1);
         let discrepancy = manager.account.discrepancy();
-        assert_eq!(discrepancy, 0);
+        assert_eq!(discrepancy.to_sat(), 0);
 
         // Try with only the first pegout being processed
         proposal.pegouts = vec![pegout_ref1];
-        proposal.change[0] = 890000;
+        proposal.change[0] = Amount::from_sat(890000);
         manager = manager_copy.clone();
 
         manager.validate_proposal(&proposal, |_| Ok(()), false).unwrap();
         let discrepancy = manager.account.discrepancy();
-        assert_eq!(discrepancy, 0);
+        assert_eq!(discrepancy.to_sat(), 0);
 
         // Try with only the second pegout being processed - should error
         manager = manager_copy.clone();
@@ -2305,18 +2287,18 @@ pub mod tests {
             panic!("should not allow skipping outputs");
         }
         let discrepancy = manager.account.discrepancy();
-        assert_eq!(discrepancy, 0);
+        assert_eq!(discrepancy.to_sat(), 0);
 
         process_main_transaction(&mut manager, &tx, 1, 1);
         let discrepancy = manager.account.discrepancy();
-        assert_eq!(discrepancy, 0);
+        assert_eq!(discrepancy.to_sat(), 0);
 
         // Try with only the one pegout being confirmed (indistinguishable which one)
         // without either being seen at signing-time
         manager = manager_copy.clone();
         process_main_transaction(&mut manager, &tx, 1, 1);
         let discrepancy = manager.account.discrepancy();
-        assert_eq!(discrepancy, 0);
+        assert_eq!(discrepancy.to_sat(), 0);
     }
 
     #[test]
@@ -2327,7 +2309,7 @@ pub mod tests {
         let mut donation_tx = setup.main_tx_donation();
         let donation_output = bitcoin::TxOut {
             script_pubkey: donation_tx.output[0].script_pubkey.clone(),
-            value: 10000,
+            value: Amount::from_sat(10000),
         };
         donation_tx.output = vec![donation_output; 50];
         process_main_transaction(&mut manager, &donation_tx, 1, 1);
@@ -2343,27 +2325,27 @@ pub mod tests {
                 vout: n,
             }).collect(),
             pegouts: vec![],
-            change: vec![90_000; 5],
+            change: vec![Amount::from_sat(90_000); 5],
         };
         let (unsigned_tx, inputs) = manager.validate_proposal(&proposal, |_| Ok(()), false).unwrap();
 
         assert_eq!(manager.fee_pool.available_funds(), starting_pool);
         manager.prepare_to_sign(&proposal, &unsigned_tx, &inputs).unwrap();
-        assert_eq!(manager.fee_pool.available_funds(), starting_pool - 50_000);
+        assert_eq!(manager.fee_pool.available_funds(), starting_pool - SignedAmount::from_sat(50_000));
         process_main_transaction(&mut manager, &unsigned_tx, 100, 1);
-        assert_eq!(manager.fee_pool.available_funds(), starting_pool - 50_000);
+        assert_eq!(manager.fee_pool.available_funds(), starting_pool - SignedAmount::from_sat(50_000));
 
         // regression test for #225
         process_main_transaction(&mut m_copy[0], &unsigned_tx, 100, 1);
-        assert_eq!(m_copy[0].fee_pool.available_funds(), starting_pool - 50_000);
+        assert_eq!(m_copy[0].fee_pool.available_funds(), starting_pool - SignedAmount::from_sat(50_000));
 
         m_copy[1].prepare_to_sign(&proposal, &unsigned_tx, &inputs).unwrap();
-        assert_eq!(manager.fee_pool.available_funds(), starting_pool - 50_000);
+        assert_eq!(manager.fee_pool.available_funds(), starting_pool - SignedAmount::from_sat(50_000));
         process_main_transaction(&mut m_copy[1], &unsigned_tx, 100, 1);
-        assert_eq!(m_copy[1].fee_pool.available_funds(), starting_pool - 50_000);
+        assert_eq!(m_copy[1].fee_pool.available_funds(), starting_pool - SignedAmount::from_sat(50_000));
 
         process_main_transaction(&mut m_copy[2], &unsigned_tx, 100, 1);
-        assert_eq!(m_copy[2].fee_pool.available_funds(), starting_pool - 50_000);
+        assert_eq!(m_copy[2].fee_pool.available_funds(), starting_pool - SignedAmount::from_sat(50_000));
     }
 
     /// Helper function to create a sidechain transaction that'll endow
@@ -2559,7 +2541,7 @@ pub mod tests {
         ).unwrap();
         assert!(tx.input.len() < 500);
         assert!(tx.output.len() < 253);
-        assert!(tx.weight() <= constants::MAXIMUM_TX_WEIGHT);
+        assert!(tx.weight().to_wu() <= constants::MAXIMUM_TX_WEIGHT as u64);
 
         let tx = fund_transaction(
             &vec![100_000; 500],
@@ -2571,7 +2553,7 @@ pub mod tests {
         assert!(tx.input.len() < 253);
         assert!(tx.output.len() >= 253);
         assert!(tx.output.len() < 800);
-        assert!(tx.weight() <= constants::MAXIMUM_TX_WEIGHT);
+        assert!(tx.weight().to_wu() <= constants::MAXIMUM_TX_WEIGHT as u64);
     }
 
     #[test]
@@ -3002,8 +2984,8 @@ pub mod tests {
     fn multiple_pegouts_same_output_one_tx() {
         let mut input = bitcoin::TxIn {
             previous_output: bitcoin::OutPoint::default(),
-            sequence: 0,
-            script_sig: bitcoin::Script::new(),
+            sequence: bitcoin::Sequence::ZERO,
+            script_sig: bitcoin::ScriptBuf::new(),
             witness: bitcoin::Witness::default(),
         };
 
@@ -3039,7 +3021,7 @@ pub mod tests {
                     TxObject::Pegout(outpoint, data) => {
                         requests.push(outpoint);
                         txouts.push(bitcoin::TxOut {
-                            value: data.value,
+                            value: Amount::from_sat(data.value),
                             script_pubkey: data.script_pubkey,
                         });
                     }
@@ -3048,8 +3030,8 @@ pub mod tests {
 
             // Single pegout
             let one_tx = bitcoin::Transaction {
-                version: 1,
-                lock_time: 0,
+                version: bitcoin::transaction::Version::ONE,
+                lock_time: LockTime::ZERO,
                 input: vec![input.clone()],
                 output: vec![txouts[0].clone()],
             };
@@ -3074,8 +3056,8 @@ pub mod tests {
 
             // Many pegouts
             let mut n_tx = bitcoin::Transaction {
-                version: 1,
-                lock_time: 0,
+                version: bitcoin::transaction::Version::ONE,
+                lock_time: LockTime::ZERO,
                 input: vec![input.clone()],
                 output: vec![txouts[0].clone(); count],
             };
@@ -3120,14 +3102,14 @@ pub mod tests {
             // Check that if the inputs are mixed known and unknown, the right
             // error is returned.
             let bad_tx = bitcoin::Transaction {
-                version: 1,
-                lock_time: 0,
+                version: bitcoin::transaction::Version::ONE,
+                lock_time: LockTime::ZERO,
                 input: vec![
                     input.clone(),
                     bitcoin::TxIn {
                         previous_output: bitcoin::OutPoint::default(),
-                        sequence: 0,
-                        script_sig: bitcoin::Script::new(),
+                        sequence: bitcoin::Sequence::ZERO,
+                        script_sig: bitcoin::ScriptBuf::new(),
                         witness: bitcoin::Witness::default(),
                     },
                 ],
@@ -3179,12 +3161,12 @@ pub mod tests {
         let first = transaction::ConcreteProposal {
             inputs: vec![inputs[0]],
             pegouts: vec![requests[0], requests[1], requests[2]],
-            change: vec![40_000],
+            change: vec![Amount::from_sat(40_000)],
         };
         let second = transaction::ConcreteProposal {
             inputs: vec![inputs[1]],
             pegouts: vec![requests[3], requests[4]],
-            change: vec![90_000],
+            change: vec![Amount::from_sat(90_000)],
         };
 
         // Refuse to sign second as it skips the first 3 requests
@@ -3252,7 +3234,7 @@ pub mod tests {
         setup_tx.output[0].script_pubkey = elements::script::Builder::new()
             .push_opcode(elements::opcodes::all::OP_RETURN)
             .push_slice(&manager.genesis_hash[..])
-            .push_slice(&fed_spk[..])
+            .push_slice(fed_spk.as_bytes())
             .into_script();
 
         println!("new setup tx txid: {}", setup_tx.txid());
@@ -3306,7 +3288,7 @@ pub mod tests {
         let proposal_pegout = transaction::ConcreteProposal {
             inputs: vec![utxo_outpoint],
             pegouts: vec![request_outpoint],
-            change: vec![40_000],
+            change: vec![Amount::from_sat(40_000)],
         };
         if let Err(Error::BadProposal(
             ProposalError::UnknownPegout(outpoint)
@@ -3321,7 +3303,7 @@ pub mod tests {
         let proposal_change = transaction::ConcreteProposal {
             inputs: vec![utxo_outpoint],
             pegouts: vec![],
-            change: vec![50_000, 40_000],
+            change: vec![Amount::from_sat(50_000), Amount::from_sat(40_000)],
         };
         let tx_change = manager.validate_proposal(&proposal_change, |_| Ok(()), false)
             .expect("accept change proposal")
@@ -3353,13 +3335,12 @@ pub mod tests {
 
         let coinbase = elements::Transaction {
             version: 0,
-            lock_time: 0,
+            lock_time: elements::LockTime::ZERO,
             input: vec![elements::TxIn {
                 previous_output: elements::OutPoint::default(),
                 is_pegin: false,
-                has_issuance: false,
                 script_sig: elements::Script::new(),
-                sequence: 0,
+                sequence: elements::Sequence::ZERO,
                 asset_issuance: elements::AssetIssuance::default(),
                 witness: elements::TxInWitness::default(),
             }],
@@ -3378,8 +3359,8 @@ pub mod tests {
         let block = elements::Block {
             header: elements::BlockHeader {
                 version: 0,
-                prev_blockhash: Default::default(),
-                merkle_root: Default::default(),
+                prev_blockhash: elements::BlockHash::all_zeros(),
+                merkle_root: elements::TxMerkleNode::all_zeros(),
                 time: 0,
                 height: 1,
                 ext: elements::BlockExtData::Proof {
@@ -3392,7 +3373,7 @@ pub mod tests {
         let tip = elements::BlockHeader {
             version: 0,
             prev_blockhash: block.block_hash(),
-            merkle_root: Default::default(),
+            merkle_root: elements::TxMerkleNode::all_zeros(),
             // Set tip time so the test doesn't wait for 5 seconds
             time: time::SystemTime::now().duration_since(time::UNIX_EPOCH).unwrap().as_secs() as u32,
             height: 1,
@@ -3416,18 +3397,18 @@ pub mod tests {
                 let response = match query {
                     "getblockhash" => {
                         assert_eq!(args[0].as_u64().expect("arg must be int"), 1);
-                        format!("\"{}\"", self.block.block_hash().to_hex())
+                        format!("\"{}\"", self.block.block_hash())
                     }
                     "getbestblockhash" => {
-                        format!("\"{}\"", self.tip.block_hash().to_hex())
+                        format!("\"{}\"", self.tip.block_hash())
                     }
                     "getblock" => {
-                        let hash = elements::BlockHash::from_hex(args[0].as_str().unwrap()).unwrap();
+                        let hash = elements::BlockHash::from_str(args[0].as_str().unwrap()).unwrap();
                         assert_eq!(self.block.block_hash(), hash);
                         format!("\"{}\"", elements::encode::serialize_hex(self.block))
                     }
                     "getblockheader" => {
-                        let hash = elements::BlockHash::from_hex(args[0].as_str().unwrap()).unwrap();
+                        let hash = elements::BlockHash::from_str(args[0].as_str().unwrap()).unwrap();
                         assert_eq!(self.tip.block_hash(), hash);
                         format!("\"{}\"", elements::encode::serialize_hex(self.tip))
                     }
@@ -3557,7 +3538,7 @@ pub mod tests {
 
         let original_len = fs::metadata(sample_file).unwrap().len();
         let diff = original_len as i64 - created_len as i64;
-        assert_eq!((1113869, -2718), (created_len, diff));
+        assert_eq!((1087548, 23603), (created_len, diff));
         // NB can't use checksum because of randomness in hashmap ordering
     }
 
@@ -3565,8 +3546,8 @@ pub mod tests {
     fn error_on_unowned_input() {
         let unknown_input = bitcoin::TxIn {
             previous_output: bitcoin::OutPoint::default(),
-            sequence: 0,
-            script_sig: bitcoin::Script::new(),
+            sequence: bitcoin::Sequence::ZERO,
+            script_sig: bitcoin::ScriptBuf::new(),
             witness: bitcoin::Witness::default(),
         };
         let mut known_input = unknown_input.clone();
@@ -3586,8 +3567,8 @@ pub mod tests {
             }
         }
         let bad_tx = bitcoin::Transaction {
-            version: 1,
-            lock_time: 0,
+            version: bitcoin::transaction::Version::ONE,
+            lock_time: bitcoin::absolute::LockTime::ZERO,
             input: vec![known_input, unknown_input.clone()],
             output: vec![],
         };
@@ -3605,7 +3586,7 @@ pub mod tests {
         use std::str::FromStr;
 
         let hash = sha256d::Hash::hash(&[0]);
-        let asset_id = AssetId::from_slice(&hash).unwrap();
+        let asset_id = AssetId::from_slice(hash.to_byte_array().as_slice()).unwrap();
 
         let op_return = |data: &[u8]| -> elements::TxOut {
             let script = elements::script::Builder::new()
@@ -3623,17 +3604,16 @@ pub mod tests {
 
         let commitment = bitcoin::BlockHash::hash(&[1, 2, 3]);
         let block = elements::Block {
-            header: elements::BlockHeader::default(),
+            header: empty_elements_block().header.clone(),
             txdata: vec![
                 elements::Transaction {
                     version: 0,
-                    lock_time: 0,
+                    lock_time: elements::LockTime::ZERO,
                     input: vec![elements::TxIn {
                         previous_output: elements::OutPoint::default(),
                         is_pegin: false,
-                        has_issuance: false,
                         script_sig: elements::Script::new(),
-                        sequence: 0,
+                        sequence: elements::Sequence::ZERO,
                         asset_issuance: elements::AssetIssuance::default(),
                         witness: elements::TxInWitness::default(),
                     }],
@@ -3657,7 +3637,7 @@ pub mod tests {
                         ),
                         op_return(
                             &constants::MAINCHAIN_COMMITMENT_HEADER.iter().copied()
-                                .chain(commitment.iter().copied())
+                                .chain(commitment.to_byte_array().iter().copied())
                                 .collect::<Vec<_>>(),
                         ),
                         op_return(
@@ -3716,7 +3696,7 @@ pub mod tests {
         }
 
         impl rpc::BitcoinRpc for DummyBitcoind {
-            fn raw_header(&self, _hash: bitcoin::BlockHash) -> Result<bitcoin::BlockHeader, jsonrpc::Error> {
+            fn raw_header(&self, _hash: bitcoin::BlockHash) -> Result<bitcoin::block::Header, jsonrpc::Error> {
                 // This test uses the duration of 24 hours. So, all time diffs <=
                 // 24 hrs +/- epsilon should be considered synced.
                 // Anything else should be considered not synced
@@ -3734,12 +3714,12 @@ pub mod tests {
                 self.prev_calls.set(self.prev_calls.get() + 1);
 
                 // A header with dummy fields, except for the time field.
-                Ok(bitcoin::BlockHeader {
-                    version: 1,
+                Ok(bitcoin::block::Header {
+                    version: bitcoin::block::Version::ONE,
                     prev_blockhash: bitcoin::BlockHash::from_str(&vec!["0"; 64].into_iter().collect::<String>()).unwrap(),
                     merkle_root: bitcoin::TxMerkleNode::from_str(&vec!["0"; 64].into_iter().collect::<String>()).unwrap(),
                     time: unix_block_time as u32,
-                    bits: 0,
+                    bits: CompactTarget::from_consensus(0),
                     nonce: 0
                 })
             }

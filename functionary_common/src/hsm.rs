@@ -19,7 +19,8 @@ use std::convert::TryFrom;
 use std::fmt::Formatter;
 use std::io::Write;
 
-use bitcoin::hashes::{Hash, hex, sha256d};
+use bitcoin::hashes::{Hash, sha256d};
+use elements::hex;
 use bitcoin::secp256k1;
 use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
 
@@ -428,7 +429,7 @@ pub enum Error {
     /// Some bitcoin decoding error
     Bitcoin(bitcoin::consensus::encode::Error),
     /// Key error.
-    Key(bitcoin::util::key::Error),
+    Key(bitcoin::key::Error),
     /// Some crypto error
     Secp(secp256k1::Error),
     /// Some I/O error
@@ -467,8 +468,8 @@ impl From<io::Error> for Error {
     fn from(e: io::Error) -> Error { Error::Io(e) }
 }
 
-impl From<bitcoin::util::key::Error> for Error {
-    fn from(e: bitcoin::util::key::Error) -> Error { Error::Key(e) }
+impl From<bitcoin::key::Error> for Error {
+    fn from(e: bitcoin::key::Error) -> Error { Error::Key(e) }
 }
 
 impl From<secp256k1::Error> for Error {

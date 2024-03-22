@@ -26,10 +26,8 @@ use std::collections::HashSet;
 use std::fmt;
 use std::time::Duration;
 
-use bitcoin;
 use bitcoin::hashes::{sha256, sha256d};
 use bitcoin::OutPoint;
-use elements;
 
 use common::{PakList, PeerId};
 
@@ -160,9 +158,9 @@ impl serde::Serialize for ChangeAddress {
         let mut ser = serializer.serialize_map(Some(3))?;
         let mut addr = self.address.clone();
         ser.serialize_entry("address_mainnet", &addr)?;
-        addr.network = bitcoin::Network::Testnet;
+        addr = bitcoin::Address::new(bitcoin::Network::Testnet, addr.into_parts().1);
         ser.serialize_entry("address_testnet", &addr)?;
-        addr.network = bitcoin::Network::Regtest;
+        addr = bitcoin::Address::new(bitcoin::Network::Regtest, addr.into_parts().1);
         ser.serialize_entry("address_regtest", &addr)?;
         ser.end()
     }
@@ -181,9 +179,9 @@ impl serde::Serialize for CsvTweakedChangeAddress {
         let mut ser = serializer.serialize_map(Some(3))?;
         let mut addr = self.address.clone();
         ser.serialize_entry("address_mainnet", &addr)?;
-        addr.network = bitcoin::Network::Testnet;
+        addr = bitcoin::Address::new(bitcoin::Network::Testnet, addr.into_parts().1);
         ser.serialize_entry("address_testnet", &addr)?;
-        addr.network = bitcoin::Network::Regtest;
+        addr = bitcoin::Address::new(bitcoin::Network::Regtest, addr.into_parts().1);
         ser.serialize_entry("address_regtest", &addr)?;
         ser.end()
     }
@@ -222,11 +220,11 @@ pub(crate) mod serde_btc_addr {
     pub fn serialize<S: serde::Serializer>(addr: &bitcoin::Address, s: S) -> Result<S::Ok, S::Error>  {
         let mut ser = s.serialize_map(Some(3))?;
         let mut addr = addr.clone();
-        addr.network = bitcoin::Network::Bitcoin;
+        addr = bitcoin::Address::new(bitcoin::Network::Bitcoin, addr.into_parts().1);
         ser.serialize_entry("mainnet", &addr)?;
-        addr.network = bitcoin::Network::Testnet;
+        addr = bitcoin::Address::new(bitcoin::Network::Testnet, addr.into_parts().1);
         ser.serialize_entry("testnet", &addr)?;
-        addr.network = bitcoin::Network::Regtest;
+        addr = bitcoin::Address::new(bitcoin::Network::Regtest, addr.into_parts().1);
         ser.serialize_entry("regtest", &addr)?;
         ser.end()
     }

@@ -22,12 +22,10 @@ use std::collections::HashSet;
 use std::time::{Duration, Instant};
 use std::cmp;
 
-use bitcoin;
 use bitcoin::consensus::{deserialize, Decodable};
-use bitcoin::hashes::hex::{FromHex, ToHex};
+use bitcoin::hashes::hex::{FromHex, DisplayHex};
 use bitcoin::hashes::{sha256, sha256d};
 use bitcoin::secp256k1::PublicKey;
-use serde_json;
 use serde::Serialize;
 use serde_json::value::RawValue;
 
@@ -72,7 +70,7 @@ pub struct ElementsTxInfo {
 #[derive(Clone, PartialEq, Eq, Debug, Deserialize, Serialize)]
 pub struct EstimateSmartFeeResponse {
     /// The feerate.
-    #[serde(default, with = "bitcoin::util::amount::serde::as_btc::opt")]
+    #[serde(default, with = "bitcoin::amount::serde::as_btc::opt")]
     pub feerate: Option<bitcoin::Amount>,
     /// Errors encountered during processing
     #[serde(default)]
@@ -103,7 +101,7 @@ pub struct SidechainInfo {
     /// Asset ID of the pegged asset
     pub pegged_asset: elements::AssetId,
     /// Federated peg script
-    pub fedpegscript: bitcoin::Script,
+    pub fedpegscript: bitcoin::ScriptBuf,
     /// The depth for a pegin transaction to be considered final.
     /// Older versions (<= 0.14.x) of Elements don't provide this field.
     pub pegin_confirmation_depth: Option<BlockHeight>,
@@ -148,6 +146,14 @@ pub struct GetMempoolEntryResponse {
     pub vsize: u64,
     /// transaction weight as defined in BIP 141
     pub weight: u64,
+}
+
+/// Specify the fee estimation mode
+pub enum EstimationMode {
+    /// Conservative estimate
+    Conservative,
+    /// Economical estimate
+    Economical,
 }
 
 /// Trait representing something we can do general JSONRPC queries on; abstracts
@@ -246,7 +252,7 @@ pub trait BitcoinRpc: Rpc {
     }
 
     /// Get the raw block header.
-    fn raw_header(&self, hash: bitcoin::BlockHash) -> Result<bitcoin::BlockHeader, jsonrpc::Error> {
+    fn raw_header(&self, hash: bitcoin::BlockHash) -> Result<bitcoin::blockdata::block::Header, jsonrpc::Error> {
         self.jsonrpc_query_hex("getblockheader", &[hash.to_string().into(), false.into()])
     }
 
@@ -307,8 +313,13 @@ pub trait BitcoinRpc: Rpc {
     }
 
     /// Get a smart fee estimate.
-    fn estimate_smart_fee(&self, confirm_target: BlockHeight) -> Result<EstimateSmartFeeResponse, jsonrpc::Error> {
-        self.jsonrpc_query("estimatesmartfee", &[confirm_target.into()])
+    fn estimate_smart_fee(&self, confirm_target: BlockHeight, mode: EstimationMode) -> Result<EstimateSmartFeeResponse, jsonrpc::Error> {
+        let args = match mode {
+            EstimationMode::Conservative => [confirm_target.into(), "conservative".into()],
+            EstimationMode::Economical => [confirm_target.into(), "economical".into()]
+        };
+
+        self.jsonrpc_query("estimatesmartfee", &args)
     }
 
     /// Get all txids in the mempool.
@@ -443,8 +454,8 @@ pub trait ElementsRpc: Rpc {
             pub current_params_root: sha256::Midstate,
             pub current_signblock_hex: elements::Script,
             pub max_block_witness: u32,
-            pub current_fedpeg_program: bitcoin::Script,
-            pub current_fedpeg_script: bitcoin::Script,
+            pub current_fedpeg_program: bitcoin::ScriptBuf,
+            pub current_fedpeg_script: bitcoin::ScriptBuf,
             pub extension_space: Vec<String>,
             pub epoch_age: BlockHeight,
             pub epoch_length: BlockHeight,
@@ -452,14 +463,16 @@ pub trait ElementsRpc: Rpc {
         }
 
         let res = self.jsonrpc_query::<Response>("getblockchaininfo", &[])?;
-        let params = elements::dynafed::Params::Full {
-            signblockscript: res.current_signblock_hex.clone(),
-            signblock_witness_limit: res.max_block_witness,
-            fedpeg_program: res.current_fedpeg_program,
-            fedpegscript: res.current_fedpeg_script.into_bytes(),
-            extension_space: res.extension_space.into_iter()
-                .map(|h| FromHex::from_hex(&h).expect("invalid hex")).collect(),
-        };
+        let params = elements::dynafed::Params::Full(
+            elements::dynafed::FullParams::new(
+                res.current_signblock_hex.clone(),
+                res.max_block_witness,
+                res.current_fedpeg_program,
+                res.current_fedpeg_script.into_bytes(),
+                res.extension_space.into_iter()
+                    .map(|h| FromHex::from_hex(&h).expect("invalid hex")).collect(),
+            )
+        );
         assert_eq!(params.calculate_root(), res.current_params_root, "our root calculation is broken?!");
 
         Ok(BlockchainInfo {
@@ -480,7 +493,7 @@ pub trait ElementsRpc: Rpc {
 
     /// Get a new generated block.
     fn new_block_with_commitments(&self, commitments: &[Vec<u8>]) -> Result<elements::Block, jsonrpc::Error> {
-        let hex_commitments: Vec<String> = commitments.into_iter().map(|c| c.to_hex()).collect();
+        let hex_commitments: Vec<String> = commitments.into_iter().map(|c| c.as_hex().to_string()).collect();
 
         let args = Vec::from([0.into(), serde_json::Value::Null, serde_json::Value::from(hex_commitments)]);
 
@@ -809,8 +822,6 @@ impl Clone for Elements {
 
 #[cfg(test)]
 mod tests {
-    use jsonrpc::serde_json;
-
     use super::*;
 
     #[test]
@@ -828,7 +839,7 @@ mod tests {
           \"blocks\": 2
         }";
         let decode: EstimateSmartFeeResponse = serde_json::from_str(&estimatesmartfee).expect("decoding json");
-        assert_eq!(decode.feerate.unwrap().as_sat(), 44301);
+        assert_eq!(decode.feerate.unwrap().to_sat(), 44301);
         assert!(decode.errors.is_empty());
         assert_eq!(decode.blocks, 2);
 

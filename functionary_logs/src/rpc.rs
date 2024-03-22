@@ -17,8 +17,6 @@
 //! # RPC logs
 //!
 
-use jsonrpc;
-
 /// an RPC request
 #[derive(Copy, Clone, PartialEq, Eq, Debug, Serialize)]
 pub struct RpcRequest<'a> {

@@ -14,12 +14,13 @@
 //You should have received a copy of the GNU Affero General Public License
 //along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
+
 use crate::constants::HSM_MAX_MESSAGE_SIZE;
 use crate::error::Error;
 use crate::frame_reader::Decoder;
 use anyhow::Context;
-use bitcoin::hashes::hex::ToHex;
 use bitcoin::hashes::{sha256d, Hash};
+use bitcoin::hex::DisplayHex;
 use byteorder::{LittleEndian, ReadBytesExt};
 use functionary_common::hsm::{Address, Command, Header, HEADER_LEN};
 use std::fmt::{Display, Formatter};
@@ -140,7 +141,7 @@ impl Display for ParallelPortMessage {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}, ", self.header)?;
         write!(f, "Sequence Number: {:?}, ", self.sequence_number)?;
-        write!(f, "Payload: {}", self.payload.to_hex())
+        write!(f, "Payload: {}", self.payload.as_hex())
     }
 }
 

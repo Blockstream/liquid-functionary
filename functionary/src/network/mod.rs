@@ -382,7 +382,7 @@ impl Router {
             self.send_msg_to_peer_id(msg.header().receiver, msg.clone());
 
             // Send to relays
-            let (relay_1, relay_2) = self.relay_peers(sender, msg.header().receiver, &msg.header().hash);
+            let (relay_1, relay_2) = self.relay_peers(sender, msg.header().receiver, &msg.header().hash.as_ref());
             if relay_1 != sender && relay_1 != self.peers.my_id() {
                 self.send_msg_to_peer_id(relay_1, msg.clone());
             }
@@ -445,7 +445,7 @@ impl Router {
                     continue;
                 }
                 // Choose two backups who relay; others do not.
-                let (id1, id2) = self.relay_peers(sender, peer_id, &msg.header().hash);
+                let (id1, id2) = self.relay_peers(sender, peer_id, &msg.header().hash.as_ref());
                 log!(Trace, "relay_peers for message {}: {}, {} (sender: {}, receiver: {}, us: {}): relay:{}",
                     &msg.header().hash, id1, id2, sender, peer_id, self.peers.my_id(),
                     id1 == self.peers.my_id() || id2 == self.peers.my_id(),
@@ -470,7 +470,7 @@ impl Router {
             // Once phase 3 is rolled out we can remove this branch
             let _ = common::rollouts::Broadcast::Phase3;
             // Choose two backups who relay; others do not.
-            let (id1, id2) = self.relay_peers(sender, rcvr, &msg.header().hash);
+            let (id1, id2) = self.relay_peers(sender, rcvr, &msg.header().hash.as_ref());
             log!(Trace, "relay_peers for message {}: {}, {} (sender: {}, receiver: {}, us: {}): relay:{}",
                 &msg.header().hash, id1, id2, sender, rcvr, self.peers.my_id(),
                 id1 == self.peers.my_id() || id2 == self.peers.my_id(),
@@ -665,7 +665,6 @@ impl Router {
 #[cfg(test)]
 mod tests {
     use std::collections::HashSet;
-    use std::time::Duration;
     use bitcoin::secp256k1::SignOnly;
     use common::rollouts::{Broadcast, Rollouts, set_rollouts_on_startup, StatusAckElim};
     use common::{PeerId, RoundStage};
@@ -873,7 +872,7 @@ mod tests {
             0,
             vec![],
             vec![],
-            elements::BlockHash::default(),
+            elements::BlockHash::all_zeros(),
             0,
             vec![],
             "msg1".to_string(),

@@ -34,14 +34,13 @@ extern crate bitcoin;
 extern crate byteorder;
 #[cfg(test)]
 #[macro_use] extern crate hex_literal;
+#[cfg(test)]
 extern crate jsonrpc;
 extern crate elements;
 extern crate miniscript;
 extern crate serde;
 #[macro_use] extern crate serde_derive;
 extern crate serde_json;
-#[cfg(test)]
-extern crate tempfile;
 extern crate time;
 
 #[macro_use]

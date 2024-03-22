@@ -25,11 +25,11 @@
 //! config files.
 
 use std::borrow::Cow;
-use bitcoin;
 use bitcoin::hashes::sha256;
-use bitcoin::hashes::hex::ToHex;
+use bitcoin::hashes::hex::DisplayHex;
 use bitcoin::secp256k1::{self, Secp256k1};
 use elements::dynafed;
+use elements::hashes::hex::Case;
 use common::rollouts::ROLLOUTS;
 use miniscript::Descriptor;
 
@@ -106,7 +106,7 @@ pub struct TrackedParams {
     pub root: sha256::Midstate,
 
     /// `scriptPubKey` used for pegins.
-    pub fedpeg_program: bitcoin::Script,
+    pub fedpeg_program: bitcoin::ScriptBuf,
     /// For v0 fedpeg programs, the witness script of the fedpeg program.
     pub fedpeg_script: Vec<u8>,
     /// The PAK list.
@@ -119,7 +119,7 @@ pub struct TrackedParams {
     pub start_height: Option<BlockHeight>,
     /// The CSV-tweaked variant of the change script.
     /// Only for the legacy descriptor.
-    pub csv_tweaked_program: Option<bitcoin::Script>,
+    pub csv_tweaked_program: Option<bitcoin::ScriptBuf>,
 
     /// The mainchain commitment from the block where these parameters were activated
     /// Value will be 0 for the legacy params.
@@ -134,12 +134,12 @@ impl TrackedParams {
     ) -> TrackedParams {
         assert!(params.is_full());
         let root = params.calculate_root();
-        if let dynafed::Params::Full { fedpeg_program, fedpegscript, extension_space, .. } = params {
+        if let dynafed::Params::Full(_) = params {
             TrackedParams {
                 root: root,
-                fedpeg_program: fedpeg_program,
-                fedpeg_script: fedpegscript,
-                pak_list: PakList::from_extension_space(&extension_space)
+                fedpeg_program: params.fedpeg_program().expect("fedpeg_program present in full params").clone(),
+                fedpeg_script: params.fedpegscript().expect("fedpegscript present in full params").clone(),
+                pak_list: PakList::from_extension_space(&params.extension_space().expect("extension_space present in full params"))
                     .expect("unparsable PAK list activated on the network"),
                 start_height: known.as_ref().map(|(h, _)| *h),
                 csv_tweaked_program: known.as_ref().and_then(|(_, d)| d.csv_tweaked_spk.clone()),
@@ -163,7 +163,7 @@ impl TrackedParams {
     fn matches_pegin<C: secp256k1::Verification>(
         &self,
         secp: &Secp256k1<C>,
-        output_script: &bitcoin::Script,
+        output_script: &bitcoin::ScriptBuf,
         claim_script: &[u8],
     ) -> Option<Descriptor<tweak::Key>> {
         let tweaked_desc = self.descriptor.as_ref()?.tweak(secp, &claim_script[..]);
@@ -175,7 +175,7 @@ impl TrackedParams {
     }
 
     /// Whether the given scriptPubkey matches the fedpeg_program.
-    pub fn matches(&self, spk: &bitcoin::Script) -> bool {
+    pub fn matches(&self, spk: &bitcoin::ScriptBuf) -> bool {
         // this should always keep matching the legacy csv tweaked program
         // because it's used for chain sync
         *spk == self.fedpeg_program
@@ -183,7 +183,7 @@ impl TrackedParams {
     }
 
     /// Same as [matches], but returns the descriptor, regular or tweaked, that was matched.
-    pub fn matches_descriptor(&self, spk: &bitcoin::Script) -> Option<&Descriptor<tweak::Key>> {
+    pub fn matches_descriptor(&self, spk: &bitcoin::ScriptBuf) -> Option<&Descriptor<tweak::Key>> {
         self.descriptor.as_ref().and_then(|d| d.matches(spk))
     }
 }
@@ -224,7 +224,7 @@ impl ConsensusTracker {
     }
 
     /// Find an activated descriptor which matches the provided script_pubkey (regular or tweaked).
-    pub fn matches_activated_descriptor(&self, spk: &bitcoin::Script) -> Option<&Descriptor<tweak::Key>> {
+    pub fn matches_activated_descriptor(&self, spk: &bitcoin::ScriptBuf) -> Option<&Descriptor<tweak::Key>> {
         let legacy_descriptor = self.legacy_descriptor();
         if let Some(desc) = legacy_descriptor.matches(spk) {
             return Some(desc);
@@ -240,7 +240,7 @@ impl ConsensusTracker {
     }
 
     /// Whether the given scriptPubkey matches the currently active fedpeg_program.
-    pub fn matches_active_spk(&self, spk: &bitcoin::Script) -> bool {
+    pub fn matches_active_spk(&self, spk: &bitcoin::ScriptBuf) -> bool {
         if let Some((_, active_params)) = &self.history.last() {
             active_params.matches(spk)
         } else {
@@ -324,7 +324,7 @@ impl ConsensusTracker {
     }
 
     /// The active change scriptPubKey.
-    pub fn active_change_spk(&self) -> &bitcoin::Script {
+    pub fn active_change_spk(&self) -> &bitcoin::ScriptBuf {
         let desc = self.active_descriptor();
         if ROLLOUTS.hsm_csv_tweak != common::rollouts::HsmCsvTweak::Legacy {
             &desc.spk
@@ -381,7 +381,7 @@ impl ConsensusTracker {
     }
 
     /// The change scriptPubKey active at the given sidechain height.
-    pub fn change_spk_at(&self, sidechain_height: BlockHeight) -> &bitcoin::Script {
+    pub fn change_spk_at(&self, sidechain_height: BlockHeight) -> &bitcoin::ScriptBuf {
         let desc = self.descriptor_at(sidechain_height);
 
         if ROLLOUTS.hsm_csv_tweak != common::rollouts::HsmCsvTweak::Legacy {
@@ -447,7 +447,7 @@ impl ConsensusTracker {
     /// A [None] response indicates that we cannot yet be certain of the correct answer.
     pub fn is_activated_spk_at(
         &self,
-        spk: &bitcoin::Script,
+        spk: &bitcoin::ScriptBuf,
         mainchain_height: BlockHeight
     ) -> Option<bool> {
         if self.legacy_descriptor().matches(spk).is_some() {
@@ -478,7 +478,7 @@ impl ConsensusTracker {
     }
 
     /// Lookup a descriptor by scriptPubKey.
-    pub fn lookup_descriptor(&self, spk: &bitcoin::Script) -> DescLookupResult {
+    pub fn lookup_descriptor(&self, spk: &bitcoin::ScriptBuf) -> DescLookupResult {
         for (_, desc) in &self.known_descriptors {
             if *spk == desc.spk {
                 return DescLookupResult::Regular(desc);
@@ -491,7 +491,7 @@ impl ConsensusTracker {
     }
 
     /// Lookup the scriptPubkey in the history of parameters.
-    pub fn lookup_spk(&self, spk: &bitcoin::Script) -> SpkLookupResult {
+    pub fn lookup_spk(&self, spk: &bitcoin::ScriptBuf) -> SpkLookupResult {
         // reverse to match most relevant
         for (_, params) in self.history.iter().rev() {
             if *spk == params.fedpeg_program {
@@ -528,7 +528,7 @@ impl ConsensusTracker {
     pub fn find_pegin_descriptor<C: secp256k1::Verification>(
         &self,
         secp: &Secp256k1<C>,
-        output_script: &bitcoin::Script,
+        output_script: &bitcoin::ScriptBuf,
         claim_script: &[u8],
         sidechain_height: BlockHeight,
     ) -> Option<Descriptor<tweak::Key>> {
@@ -560,7 +560,7 @@ impl ConsensusTracker {
     pub fn find_historial_pegin_descriptor<C: secp256k1::Verification>(
         &self,
         secp: &Secp256k1<C>,
-        output_script: &bitcoin::Script,
+        output_script: &bitcoin::ScriptBuf,
         claim_script: &[u8],
     )-> Option<Descriptor<tweak::Key>> {
         for (_, params) in self.history.iter().rev() {
@@ -627,7 +627,7 @@ impl ConsensusTracker {
         slog!(WatchmanConsensusChanged,
             params_root: root,
             fedpeg_program: Cow::Borrowed(&tracked.fedpeg_program),
-            fedpeg_script: tracked.fedpeg_script.to_hex(),
+            fedpeg_script: tracked.fedpeg_script.to_hex_string(Case::Lower),
             pak_list: Cow::Borrowed(&tracked.pak_list),
         );
 
@@ -715,40 +715,42 @@ impl Default for ConsensusTracker {
 mod test {
     use super::*;
 
-    use bitcoin::hashes::sha256;
-    use bitcoin::secp256k1;
-
-    use descriptor::{self, TweakableDescriptor};
     use watchman;
 
     pub fn test_params_0() -> dynafed::Params {
-        dynafed::Params::Full {
-            signblockscript: Default::default(),
-            signblock_witness_limit: Default::default(),
-            fedpeg_program: watchman::blockchain::tests::test_descriptor_1().liquid_script_pubkey(),
-            fedpegscript: Default::default(),
-            extension_space: Default::default(),
-        }
+        dynafed::Params::Full(
+            dynafed::FullParams::new(
+                Default::default(),
+                Default::default(),
+                watchman::blockchain::tests::test_descriptor_1().liquid_script_pubkey(),
+                Default::default(),
+                Default::default(),
+            )
+        )
     }
 
     pub fn test_params_1() -> dynafed::Params {
-        dynafed::Params::Full {
-            signblockscript: Default::default(),
-            signblock_witness_limit: Default::default(),
-            fedpeg_program: watchman::blockchain::tests::test_descriptor_2().liquid_script_pubkey(),
-            fedpegscript: Default::default(),
-            extension_space: Default::default(),
-        }
+        dynafed::Params::Full (
+            dynafed::FullParams::new(
+                Default::default(),
+                Default::default(),
+                watchman::blockchain::tests::test_descriptor_2().liquid_script_pubkey(),
+                Default::default(),
+                Default::default(),
+            )
+        )
     }
 
     pub fn test_params_2() -> dynafed::Params {
-        dynafed::Params::Full {
-            signblockscript: Default::default(),
-            signblock_witness_limit: Default::default(),
-            fedpeg_program: watchman::blockchain::tests::test_descriptor_3().liquid_script_pubkey(),
-            fedpegscript: Default::default(),
-            extension_space: Default::default(),
-        }
+        dynafed::Params::Full (
+            elements::dynafed::FullParams::new(
+                Default::default(),
+                Default::default(),
+                watchman::blockchain::tests::test_descriptor_3().liquid_script_pubkey(),
+                Default::default(),
+                Default::default(),
+            )
+        )
     }
 
     #[test]

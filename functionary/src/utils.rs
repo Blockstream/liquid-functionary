@@ -23,7 +23,8 @@ use std::collections::VecDeque;
 use std::thread::{self, JoinHandle};
 use std::sync::{mpsc, Arc, Condvar, Mutex};
 
-use jsonrpc;
+use bitcoin::hashes::Hash;
+use elements::BlockHeader;
 
 use common::BlockHeight;
 use watchman;
@@ -36,7 +37,6 @@ pub mod serialize {
         #![allow(missing_docs)]
 
         use std::collections::HashMap;
-        use serde;
 
         pub fn serialize<S, T, U>(v: &HashMap<T, U>, s: S)
             -> Result<S::Ok, S::Error> where
@@ -92,7 +92,6 @@ pub mod serialize {
         #![allow(missing_docs)]
 
         use std::collections::BTreeMap;
-        use serde;
 
         pub fn serialize<S, T, U>(v: &BTreeMap<T, U>, s: S)
             -> Result<S::Ok, S::Error> where
@@ -147,13 +146,13 @@ pub mod serialize {
         //! Module for serialization of byte arrays as hex strings.
         #![allow(missing_docs)]
 
-        use bitcoin::hashes::hex::{FromHex, ToHex};
-        use serde;
+        use bitcoin::hashes::hex::FromHex;
+        use bitcoin::hex::DisplayHex;
 
         pub fn serialize<T, S>(bytes: &T, serializer: S) -> Result<S::Ok, S::Error>
             where T: AsRef<[u8]>, S: serde::Serializer
         {
-            serializer.serialize_str(&bytes.as_ref().to_hex())
+            serializer.serialize_str(&bytes.as_ref().as_hex().to_string())
         }
 
         pub fn deserialize<'de, D, B>(d: D) -> Result<B, D::Error>
@@ -257,7 +256,7 @@ pub mod serialize {
 }
 
 /// A block hash and height pair.
-#[derive(Clone, Copy, PartialEq, Eq, Ord, PartialOrd, Debug, Hash, Default, Serialize, Deserialize)]
+#[derive(Clone, Copy, PartialEq, Eq, Ord, PartialOrd, Debug, Hash, Serialize, Deserialize)]
 pub struct BlockRef {
     // This is a combination of blockheight and hash in that order because this
     // allows easy ordering by block height and using BlockRef as a key in an
@@ -267,6 +266,7 @@ pub struct BlockRef {
     /// The block height.
     pub height: BlockHeight,
     /// The block hash.
+    #[serde(default = "bitcoin::BlockHash::all_zeros")]
     pub hash: bitcoin::BlockHash,
 }
 
@@ -276,6 +276,15 @@ impl BlockRef {
         BlockRef {
             height: height,
             hash: hash,
+        }
+    }
+}
+
+impl std::default::Default for BlockRef {
+    fn default() -> Self {
+        BlockRef {
+            height: BlockHeight::default(),
+            hash: bitcoin::BlockHash::all_zeros(),
         }
     }
 }
@@ -510,10 +519,24 @@ impl<T> ClearableQueue<T> {
     }
 }
 
+/// Create a default empty elements block after the Default implementation was dropped upstream
+pub fn empty_elements_block() -> elements::Block {
+    elements::Block {
+        header: BlockHeader {
+            version: 0,
+            prev_blockhash: elements::BlockHash::all_zeros(),
+            merkle_root: elements::TxMerkleNode::all_zeros(),
+            time: 0,
+            height: 0,
+            ext: Default::default(),
+        },
+        txdata: vec![],
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use common::BlockHeight;
 
     struct DummyRpc(BlockHeight);
     impl_dummy_rpc!(

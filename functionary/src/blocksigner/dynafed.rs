@@ -26,8 +26,8 @@ use std::collections::HashSet;
 use bitcoin::hashes::sha256;
 use bitcoin::secp256k1::PublicKey;
 use common::{util::ToElementsScript, BlockHeight};
-use elements::{self, BlockExtData};
-use miniscript::{TranslatePk, DescriptorTrait, Descriptor};
+use elements::BlockExtData;
+use miniscript::{TranslatePk, Descriptor, translate_hash_fail, Translator};
 
 use blocksigner::config::Configuration;
 use descriptor::LiquidDescriptor;
@@ -72,7 +72,7 @@ impl fmt::Display for ParamsStatus {
 #[derive(Debug, Clone)]
 pub struct Params {
     /// The parameters' root
-    pub root: sha256::Midstate,
+    pub root: elements::hashes::sha256::Midstate,
     /// Height at which to start signalling
     pub start_height: BlockHeight,
     /// The named blocksigning descriptor, as found in the config file
@@ -84,31 +84,47 @@ pub struct Params {
     /// List of peers which have indicated support for these parameters
     pub signalled: HashSet<peer::Id>,
     /// The actual parameters
-    pub params: elements::dynafed::Params,
+    pub params: elements::dynafed::FullParams,
     /// Lifeycle status of these params
     pub status: ParamsStatus,
+}
+
+/// Translator that maps tweaked keys to explicit PublicKeys
+pub struct TweakedKeyTranslator {
+    /// Record of keys already translated
+    pub seen: HashSet<PublicKey>,
+    /// Original labelled descriptor
+    pub descriptor_named: Descriptor<String>,
+}
+
+impl Translator<tweak::Key, PublicKey, ()> for TweakedKeyTranslator {
+    fn pk(&mut self, pk: &tweak::Key) -> Result<PublicKey, ()> {
+        if let tweak::Key::Tweakable(_id, ref pk) = pk {
+            if !self.seen.insert(pk.clone()) {
+                panic!("descriptor has a duplicate key {}: {}",
+                    pk, self.descriptor_named,
+                );
+            }
+            Ok(pk.clone())
+        } else {
+            unreachable!("config already parsed this descriptor")
+        }
+    }
+
+    // We don't need to implement these methods as we are not using them in the policy.
+    // Fail if we encounter any hash fragments. See also translate_hash_clone! macro.
+    translate_hash_fail!(tweak::Key, PublicKey, ());
 }
 
 impl Params {
     /// Get the set of block signing keys of these parameters.
     pub fn block_signing_keys(&self) -> HashSet<PublicKey> {
-        let mut ret = HashSet::new();
-        self.signblock_descriptor.translate_pk::<_, _, ()>(
-            |tweaked| {
-                if let tweak::Key::Tweakable(_id, ref pk) = tweaked {
-                    if !ret.insert(pk.clone()) {
-                        panic!("signblock descriptor has a duplicate key {}: {}",
-                            pk, self.signblock_descriptor_named,
-                        );
-                    }
-                    Ok(pk.clone())
-                } else {
-                    unreachable!("config already parsed this descriptor")
-                }
-            },
-            |_pkh| unreachable!("config already parsed this descriptor"),
-        ).unwrap();
-        ret
+        let mut key_translator = TweakedKeyTranslator {
+            seen: HashSet::new(),
+            descriptor_named: self.signblock_descriptor_named.clone()
+        };
+        self.signblock_descriptor.translate_pk::<_, _>(&mut key_translator).unwrap();
+        key_translator.seen
     }
 
     /// Returns the signblock and watchman descriptors, with the signblock descriptor key
@@ -174,6 +190,7 @@ pub struct CpeSet(Vec<Params>);
 impl CpeSet {
     /// Constructs a new `CpeSet` from the set of CPEs specified in the
     /// node's configuration
+    #[allow(deprecated)]
     pub fn from_config(config: &Configuration) -> Result<CpeSet, String> {
         let mut set = Vec::<Params>::with_capacity(config.consensus.cpe.len());
 
@@ -187,17 +204,21 @@ impl CpeSet {
             let wm_desc = &cpe.watchman_descriptor;
 
             let signblockscript = bs_desc.script_pubkey().to_elements_script();
+
+            // This must be updated to the new `max_weight_to_satisfy` method during the new dynafed transition as per
+            // https://gl.blockstream.io/liquid/functionary/-/issues/1340
+            // When this is update remove the `#[allow(deprecated)]` above
             let max_weight = bs_desc.max_satisfaction_weight().expect("descriptor to be satisfiable");
             let signblock_witness_limit = cpe.override_signblock_witness_limit.unwrap_or(max_weight) as u32;
             let fedpeg_program = wm_desc.liquid_script_pubkey();
 
-            let params = elements::dynafed::Params::Full {
+            let params = elements::dynafed::FullParams::new(
                 signblockscript,
                 signblock_witness_limit,
                 fedpeg_program,
-                fedpegscript: wm_desc.liquid_witness_script().into_bytes(),
-                extension_space: cpe.watchman_pak_list.to_extension_space(),
-            };
+                wm_desc.liquid_witness_script().into_bytes(),
+                cpe.watchman_pak_list.to_extension_space(),
+            );
             let root = params.calculate_root();
             if let Some(dup) = set.iter().find(|e| e.root == root) {
                 return Err(format!(
@@ -224,15 +245,15 @@ impl CpeSet {
                 let tweaked_spk = wm_desc.csv_tweaked_descriptor().liquid_script_pubkey();
                 let send_tweaked = wm_desc.liquid_script_pubkey() != tweaked_spk;
                 (
-                    bitcoin::Address::from_script(&wm_desc.liquid_script_pubkey(), bitcoin::Network::Bitcoin).unwrap(),
-                    bitcoin::Address::from_script(&wm_desc.liquid_script_pubkey(), bitcoin::Network::Regtest).unwrap(),
-                    if send_tweaked {Some(bitcoin::Address::from_script(&tweaked_spk, bitcoin::Network::Bitcoin).unwrap().to_string())} else {None},
-                    if send_tweaked {Some(bitcoin::Address::from_script(&tweaked_spk, bitcoin::Network::Regtest).unwrap().to_string())} else {None},
+                    bitcoin::Address::from_script(wm_desc.liquid_script_pubkey().as_script(), bitcoin::Network::Bitcoin).unwrap(),
+                    bitcoin::Address::from_script(wm_desc.liquid_script_pubkey().as_script(), bitcoin::Network::Regtest).unwrap(),
+                    if send_tweaked {Some(bitcoin::Address::from_script(tweaked_spk.as_script(), bitcoin::Network::Bitcoin).unwrap().to_string())} else {None},
+                    if send_tweaked {Some(bitcoin::Address::from_script(tweaked_spk.as_script(), bitcoin::Network::Regtest).unwrap().to_string())} else {None},
                 )
             } else {
                 (
-                    wm_desc.address(bitcoin::Network::Bitcoin).unwrap(),
-                    wm_desc.address(bitcoin::Network::Regtest).unwrap(),
+                    wm_desc.address(elements::bitcoin::Network::Bitcoin).unwrap(),
+                    wm_desc.address(elements::bitcoin::Network::Regtest).unwrap(),
                     None,
                     None,
                 )
@@ -275,7 +296,7 @@ impl CpeSet {
     /// Accessor for a vector of parameters with a start height lower or equal
     /// to the given height.
     pub fn params_at(&self, height: BlockHeight) -> Vec<elements::dynafed::Params> {
-        self.0.iter().filter(|p| p.start_height <= height).map(|p| p.params.clone()).collect()
+        self.0.iter().filter(|p| p.start_height <= height).map(|p| elements::dynafed::Params::Full(p.params.clone())).collect()
     }
 
     /// Reset all vote counts to 1 in preparation for a new round
@@ -341,7 +362,7 @@ impl CpeSet {
     }
 
     /// Get the Elements consensus parameters for the given root.
-    pub fn consensus_by_root(&self, root: sha256::Midstate) -> Option<&elements::dynafed::Params> {
+    pub fn consensus_by_root(&self, root: sha256::Midstate) -> Option<&elements::dynafed::FullParams> {
         self.0.iter().find(|e| e.root == root).map(|e| &e.params)
     }
 
@@ -425,7 +446,8 @@ impl message::NetEncodable for elements::dynafed::Params {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bitcoin::hashes::sha256;
+    use bitcoin::ScriptBuf;
+    use elements::Script;
 
     #[test]
     fn test_target_params() {
@@ -433,16 +455,24 @@ mod tests {
         let peer2 = peer::Id::from(&[2, 0, 0, 0, 0, 0][..]);
         let peer3 = peer::Id::from(&[3, 0, 0, 0, 0, 0][..]);
 
+        let empty_params = elements::dynafed::FullParams::new(
+            Script::new(),
+            0,
+            ScriptBuf::new(),
+            vec![],
+            vec![]
+        );
+
         // generate 5 different params with empty signalled
         let params = (1u8..6).map(|i| Params {
-            root: sha256::Midstate::from_inner([i; 32]),
+            root: sha256::Midstate::from_byte_array([i; 32]),
             start_height: 10 * i as u64,
             signalled: Default::default(),
             // rest is dummy because unused in this test
             signblock_descriptor_named: "sh(1)".parse().unwrap(),
             signblock_descriptor: "sh(1)".parse().unwrap(),
             watchman_descriptor: "sh(1)".parse().unwrap(),
-            params: elements::dynafed::Params::Null,
+            params: empty_params.clone(),
             status: ParamsStatus::New,
         }).collect::<Vec<_>>();
 
@@ -469,14 +499,22 @@ mod tests {
 
     #[test]
     fn it_update_params_status() {
+        let empty_params = elements::dynafed::FullParams::new(
+            Script::new(),
+            0,
+            ScriptBuf::new(),
+            vec![],
+            vec![]
+        );
+
         let params = (1..=4).map(|i| Params {
-            root: sha256::Midstate::from_inner([i; 32]),
+            root: sha256::Midstate::from_byte_array([i; 32]),
             start_height: 10 * i as u64,
             signalled: Default::default(),
             signblock_descriptor_named: "sh(1)".parse().unwrap(),
             signblock_descriptor: "sh(1)".parse().unwrap(),
             watchman_descriptor: "sh(1)".parse().unwrap(),
-            params: elements::dynafed::Params::Null,
+            params: empty_params.clone(),
             status: ParamsStatus::New,
         }).collect::<Vec<_>>();
 

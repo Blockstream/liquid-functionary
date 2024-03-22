@@ -196,7 +196,6 @@ impl<T> Drop for ArcBarrier<T> {
 mod tests {
     use std::sync::mpsc;
     use std::time::Duration;
-    use std::thread;
 
     use bitcoin::hashes::hex::FromHex;
     use bitcoin::secp256k1::PublicKey;

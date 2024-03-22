@@ -37,7 +37,6 @@ use hsm_update_tool::packet::*;
 use hsm_update_tool::transfer_context::TransferContext;
 
 use bitcoin::consensus::Encodable;
-use bitcoin::hashes::hex::ToHex;
 use bitcoin::hashes::{sha256, Hash};
 use functionary_common::hsm::{self, Address::Update, Command::{HSMUpdateNACK, HSMUpdateACK}};
 #[macro_use] extern crate functionary_logs;
@@ -293,7 +292,7 @@ fn end_file_xfer_test(
     sig: &Vec<u8>,
     expected_result: (bool, bool, bool),
 ) -> bool {
-    let auth_message = "00000001".to_owned()+&file_hash.to_hex();
+    let auth_message = "00000001".to_owned() + &file_hash.to_string();
     // future: add tests for invalid auth and assert expectations
     let _sig_result = send_auth_packet(context, &auth_message, sig.as_slice());
 

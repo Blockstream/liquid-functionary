@@ -14,7 +14,7 @@
 //You should have received a copy of the GNU Affero General Public License
 //along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-pub const FUNCTIONARY_VERSION: &str = "2.3.1";
+pub const FUNCTIONARY_VERSION: &str = "2.4.0";
 pub const HSM_NUM_SOCKETS: u8 = 5;
 pub const HSM_NETWORK_MAGIC: &str = "LPT1";
 pub const HSM_MAX_MESSAGE_SIZE: usize = 100 * 1024;

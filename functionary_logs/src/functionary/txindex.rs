@@ -19,8 +19,6 @@
 
 use std::collections::HashSet;
 
-use bitcoin;
-
 /// The confirmation height of a tx.
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
 pub enum TxHeight {

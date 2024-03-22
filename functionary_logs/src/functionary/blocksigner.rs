@@ -22,8 +22,6 @@ use std::str::FromStr;
 
 use bitcoin::hashes::sha256;
 use bitcoin::secp256k1::{ecdsa::Signature, PublicKey};
-use elements;
-use miniscript;
 
 use common::{BlockHeight, SignState, PeerId};
 
@@ -228,10 +226,10 @@ pub struct BlocksignerConsensusProposal<'a> {
     pub proposed_params_root: sha256::Midstate,
     /// The current signblock scriptPubKey.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub current_fedpeg_program: Option<&'a bitcoin::Script>,
+    pub current_fedpeg_program: Option<&'a bitcoin::ScriptBuf>,
     /// The proposed signblock scriptPubKey.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub proposed_fedpeg_program: Option<&'a bitcoin::Script>,
+    pub proposed_fedpeg_program: Option<&'a bitcoin::ScriptBuf>,
     /// The current signblock script
     /// contains Option<&'a Vec<u8>>
     #[serde(skip_serializing_if = "Option::is_none")]

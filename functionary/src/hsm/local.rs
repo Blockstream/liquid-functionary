@@ -25,12 +25,9 @@ use std::cell::RefCell;
 use std::path::{Path, PathBuf};
 use std::os::unix::net::UnixStream;
 
-use bitcoin;
 use bitcoin::secp256k1::{self, PublicKey, Secp256k1, SecretKey};
-use bitcoin::util::sighash::SighashCache;
-use elements;
+use bitcoin::sighash::SighashCache;
 use elements::encode::serialize_hex;
-use serde_json;
 
 use blocksigner;
 use common::PakList;
@@ -149,7 +146,7 @@ impl LocalWatchman {
 
         let txid = tx.txid();
         for (i, (main_out, _txin)) in inputs.iter().zip(tx.input.iter()).enumerate() {
-            let sighash = cache.segwit_signature_hash(
+            let sighash = cache.p2wsh_signature_hash(
                 i,
                 &main_out.descriptor.liquid_witness_script(),
                 main_out.value,
@@ -158,7 +155,7 @@ impl LocalWatchman {
             log!(Debug, "SIGHASH for {} input #{}: {}", txid, i, sighash);
 
             let key = main_out.tweak.tweak_secret(&self.secret_key);
-            let msg = secp256k1::Message::from_slice(&sighash[..]).unwrap();
+            let msg = secp256k1::Message::from_digest_slice(&sighash[..]).unwrap();
             let sig = self.secp.sign_ecdsa(&msg, &key);
 
             ret.push((sig, bitcoin::EcdsaSighashType::All));
@@ -193,7 +190,7 @@ impl SecurityModule for LocalBlocksigner {
         let header_hex = serialize_hex(header);
         log!(Debug, "signing {}", header_hex);
         let msghash = header.block_hash();
-        let msghash = secp256k1::Message::from_slice(&msghash[..]).unwrap();
+        let msghash = secp256k1::Message::from_digest_slice(&msghash[..]).unwrap();
         // Sign and build a script (unwrap() OK as our context is definitely capable)
         let sig = self.secp.sign_ecdsa(&msghash, &self.secret_key);
 
@@ -206,7 +203,7 @@ impl SecurityModule for LocalBlocksigner {
 
     // Stub in watchman functions
     fn public_key(&self) -> Result<PublicKey, Error> { unimplemented!() }
-    fn set_witness_script(&self, _: &bitcoin::Script) -> Result<(), Error> { unimplemented!() }
+    fn set_witness_script(&self, _: &bitcoin::ScriptBuf) -> Result<(), Error> { unimplemented!() }
     fn authorized_addresses_clear(&self) -> Result<(), Error> { unimplemented!() }
     fn authorized_addresses_add(&self, _: &[u8], _: &[u8]) -> Result<(), Error> { unimplemented!() }
     fn authorization_master_keys_replace(&self, _: &PakList) -> Result<(), Error> { unimplemented!() }
@@ -232,7 +229,7 @@ impl SecurityModule for LocalWatchman {
         Ok(PublicKey::from_secret_key(&self.secp, &self.secret_key))
     }
 
-    fn set_witness_script(&self, script: &bitcoin::Script) -> Result<(), Error> {
+    fn set_witness_script(&self, script: &bitcoin::ScriptBuf) -> Result<(), Error> {
         log!(Debug, "set_witness_script called: script len: {}", script.len());
         Err(Error::ReceivedNack(Command::NackNotAllowed))
     }
@@ -366,14 +363,10 @@ mod tests {
     use std::str::FromStr;
 
     use super::*;
-    use tempfile;
     use tweak::Tweak;
-    use watchman::transaction::TransactionSignatures;
-    use watchman::utxotable::SpendableUtxo;
 
-    use bitcoin;
     use bitcoin::consensus::encode::deserialize;
-    use bitcoin::secp256k1::{Secp256k1, SecretKey, ecdsa::Signature};
+    use bitcoin::secp256k1::ecdsa::Signature;
 
     #[test]
     fn p2sh_p2wsh_sign() {
@@ -404,7 +397,7 @@ mod tests {
             ")[..],
         ).unwrap();
         let inputs = vec![
-            SpendableUtxo::new(Default::default(), 987654321, 0, Tweak::none(), "\
+            SpendableUtxo::new(Default::default(), bitcoin::Amount::from_sat(987654321), 0, Tweak::none(), "\
                 sh(wsh(multi(\
                     6,\
                     [untweaked]0307b8ae49ac90a048e9b53357a2354b3334e9c8bee813ecb98e99a7e07e8c3ba3,\
@@ -438,7 +431,7 @@ mod tests {
             "),
         ).unwrap();
         let inputs = vec![
-            SpendableUtxo::new(Default::default(), 10_0000_0000, 0, Tweak::none(), "\
+            SpendableUtxo::new(Default::default(), bitcoin::Amount::from_sat(10_0000_0000), 0, Tweak::none(), "\
                 sh(wpkh([untweaked]03ad1d8e89212f0b92c74d23bb710c00662ad1470198ac48c43f7d6f93a2a26873))\
             ".parse().unwrap())
         ];

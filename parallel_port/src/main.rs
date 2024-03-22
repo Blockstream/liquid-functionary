@@ -35,7 +35,7 @@ use crate::message::{MessageSource, ParallelPortMessage};
 use crate::serial_manager::SerialPortManager;
 use crate::socket_manager::SocketManager;
 use anyhow::bail;
-use bitcoin::hashes::hex::ToHex;
+use bitcoin::hex::DisplayHex;
 use clap::{App, Arg};
 use constants::FUNCTIONARY_VERSION;
 use functionary_common::hsm::{Address, Command, MESSAGE_VERSION};
@@ -170,7 +170,7 @@ fn main_inner() -> anyhow::Result<()> {
                             log!(
                                 Error,
                                 "Received HSM_ON_FIRE message: {}",
-                                message.payload.to_hex()
+                                message.payload.as_hex()
                             );
                         }
                         Command::HSMGetVersion => {

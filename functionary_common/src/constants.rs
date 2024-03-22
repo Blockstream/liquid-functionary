@@ -107,9 +107,6 @@ pub mod sidechain {
 #[cfg(feature = "build-constants")]
 include!(concat!(env!("OUT_DIR"), "/build_constants.rs"));
 
-
-
-
 /// Struct to contain all configurable constants.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 #[cfg_attr(feature = "serde", derive(Deserialize, Serialize))]
@@ -128,6 +125,8 @@ pub struct Constants {
     /// The number of blocks before CSV expiry an output is considered "near-expiry".
     /// It is 5 days worth of Bitcoin blocks.
     pub near_expiry_threshold: u64,
+    /// Do we use the economical fee rate estimate from bitcoind or the conservative?
+    pub use_economical_feerate_estimation: bool,
 }
 
 impl Default for Constants {
@@ -136,7 +135,8 @@ impl Default for Constants {
             min_sweep_permille: 10,
             min_sweep_value_sats: 100_000_000,
             critical_expiry_threshold: 720,
-            near_expiry_threshold: 720
+            near_expiry_threshold: 720,
+            use_economical_feerate_estimation: false,
         }
     }
 }

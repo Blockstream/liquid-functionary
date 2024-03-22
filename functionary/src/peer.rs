@@ -490,7 +490,7 @@ pub struct PeerManager<P, S> {
     tx_net: Option<mpsc::SyncSender<NetworkCtrl>>,
 }
 
-impl<P: Default + PartialEq, S> PeerManager<P, S> {
+impl<P: PartialEq, S> PeerManager<P, S> {
     /// Create a new peer manager.
     pub fn new(my_id: Id) -> PeerManager<P, S> {
         PeerManager {
@@ -560,12 +560,12 @@ impl<P: Default + PartialEq, S> PeerManager<P, S> {
     }
 
     /// Record a precommit received by a peer.
-    pub fn record_precommit(&mut self, peer: Id, precommit: P) {
+    pub fn record_precommit(&mut self, peer: Id, precommit: P, default_precommit: P) {
         // we only don't want to go back from a signature to precommit
         if let State::SentSignatures(ref mut pc, ..) = self.statuses[peer].state {
 
             // NB Remove this once signatures are accompanied with commit hashes
-            if *pc == Default::default() {
+            if *pc == default_precommit {
                 *pc = precommit;
             }
         } else {
@@ -824,12 +824,12 @@ impl<P: Default + PartialEq, S> PeerManager<P, S> {
     }
 }
 
-impl<P, S> PeerManager<P, S> where P: Copy + PartialEq + Default {
+impl<P, S> PeerManager<P, S> where P: Copy + PartialEq {
     /// This is a hacky way to replace signatures for an empty commitment.
-    pub fn replace_empty_commits(&mut self, commit: P) {
+    pub fn replace_empty_commits(&mut self, commit: P, empty_commit: P) {
         for peer in self.statuses.values_mut() {
             peer.state = match mem::replace(&mut peer.state, State::Awol) {
-                State::SentSignatures(t, sigs) if t == Default::default() => {
+                State::SentSignatures(t, sigs) if t == empty_commit => {
                     State::SentSignatures(commit, sigs)
                 }
                 s => s,
@@ -841,9 +841,8 @@ impl<P, S> PeerManager<P, S> where P: Copy + PartialEq + Default {
 #[cfg(test)]
 pub mod tests {
     use super::*;
-    use message;
 
-    use bitcoin::secp256k1::{PublicKey, SecretKey};
+    use bitcoin::secp256k1::SecretKey;
     use std::str::FromStr;
 
     /// Test function to generate a signing context and peer list, for general use

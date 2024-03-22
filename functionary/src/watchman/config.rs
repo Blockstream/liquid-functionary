@@ -21,8 +21,8 @@
 //!
 
 use bitcoin::secp256k1::SecretKey;
-use miniscript;
 use std::time::Duration;
+use bitcoin::Amount;
 
 use config;
 use config::deserialize_hex_bitcoin_tx;
@@ -127,7 +127,7 @@ pub struct Consensus {
     pub stage3: Duration,
 
     /// Feerate to use when Bitcoind cannot provide one
-    pub fallback_fee_rate: u64,
+    pub fallback_fee_rate: Amount,
     /// Whether to validate PAK proofs when processing pegouts
     pub validate_pegout_authorization_proof: bool,
     /// We get the mainchain confirmation threshold from the sidechain node.
@@ -213,5 +213,5 @@ pub struct FailedPeginData {
     /// Blockhash of the mainchain block containing lock transaction
     pub mainchain_blockhash: bitcoin::BlockHash,
     /// The peg-in claim script
-    pub claim_script: bitcoin::Script,
+    pub claim_script: bitcoin::ScriptBuf,
 }

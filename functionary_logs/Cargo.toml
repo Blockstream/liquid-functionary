@@ -1,11 +1,6 @@
-###
-### If you modify this file, please re-run `./contrib/revendor.sh` to update
-### the dependencies. See README.md for details.
-###
-
 [package]
 name = "functionary_logs"
-version = "2.3.1"
+version = "2.4.0"
 authors = ["Blockstream <support@blockstream.com>"]
 description = "Standard logs for Blockstream software."
 
@@ -23,6 +18,6 @@ serde_json = { version = "1.0", features = [ "raw_value" ] }
 
 functionary_common = { path = "../functionary_common/"}
 
-bitcoin = { version = "0.28.1", features = [ "use-serde" ] }
-elements = { version = "0.19.2", features = ["serde-feature"] }
-miniscript = { version = "7.0.2", features = [ "serde" ] }
+bitcoin = { version = "0.31.1", features = [ "serde" ] }
+elements = { version = "0.24.1", features = ["serde"] }
+miniscript = { version = "11.0.0", features = [ "serde" ] }
