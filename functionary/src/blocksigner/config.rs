@@ -86,13 +86,6 @@ pub struct Node {
     pub communication_secret_key: SecretKey,
     /// How many peers must precommit to a block before we'll sign it
     pub precommit_threshold: usize,
-    /// Allow late-arriving peer messages to trigger re-attempt
-    /// block signing (in hopes of salvaging an otherwise doomed round).
-    /// Default: false
-    pub allow_final_stage_signing: Option<bool>,
-    /// Allow legacy pre-dynafed ordering in pre-dynafed conditions
-    /// Default: false
-    pub allow_pre_dynafed_ordering: Option<bool>,
 }
 
 /// Consensus parameter entry

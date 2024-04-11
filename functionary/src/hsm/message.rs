@@ -495,6 +495,7 @@ mod tests {
                              WatchmanSignSegwitTx, WatchmanSegwitTxSignatures,
                              WatchmanHeader, WatchmanState, WatchmanStateReply,
                              WatchmanAuthorizedListReset, WatchmanAuthorizationVerify, WatchmanAuthorizationMasterKeysReplace,
+                             HSMSramQueryStatus, HSMSramStatusResponse, HSMSramAddEntropy, HSMSramRefreshKeys, HSMSramCompareKeys, HSMSramQueryTamperState, HSMSramTamperFree, HSMSramTamperingDetected, HSMSramResetTamper,
                              TamperDetectEnable, TamperDetectResponse, TamperDetectChallenge,
                              HSMUpdate, HSMUpdateACK, HSMUpdateNACK,
                              Ack, NackRetry, NackBadData, NackInternal, NackTooMany, NackRateLimit,

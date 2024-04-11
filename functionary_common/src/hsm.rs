@@ -21,8 +21,16 @@ use std::io::Write;
 
 use bitcoin::hashes::{Hash, sha256d};
 use elements::hex;
+extern crate clap;
+use self::clap::ValueEnum;
 use bitcoin::secp256k1;
 use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
+
+extern crate strum;
+#[cfg(test)]
+use self::strum::IntoEnumIterator;
+extern crate strum_macros;
+use self::strum_macros::EnumIter;
 
 /// Size of a fixed-size HSM message header
 pub const HEADER_LEN: usize = 40;
@@ -31,7 +39,7 @@ pub const HEADER_LEN: usize = 40;
 pub const MESSAGE_VERSION: u8 = 2;
 
 /// Address field for messages to the HSM
-#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+#[derive(Copy, Clone, PartialEq, Eq, Debug, ValueEnum)]
 pub enum Address {
     /// Message to/from the Rust blocksigner
     BlockSigner = 0,
@@ -48,7 +56,7 @@ pub enum Address {
 }
 
 /// Message identifier
-#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+#[derive(Copy, Clone, PartialEq, Eq, Debug, ValueEnum, EnumIter)]
 pub enum Command {
     /// Block header to validate and sign
     BlocksignerSignBlock = 0x00,
@@ -129,6 +137,26 @@ pub enum Command {
     /// NACK reply for hsm update message
     HSMUpdateNACK = 0x46,
 
+    /// Query the status of the 2nd-gen HSM SRAM (read all status registers)
+    HSMSramQueryStatus = 0xd0,
+    /// Response sent by HSM with results of status query
+    HSMSramStatusResponse = 0xd1,
+    /// Add entropy to the 2nd-gen HSM SRAM RNG
+    HSMSramAddEntropy = 0xd2,
+    /// Perform a comparison of the 1st-gen keystore with the 2nd-gen keystore
+    HSMSramCompareKeys = 0xd3,
+    /// Perform a "reliable write" of the 2nd-gen keystore from the contents of the 1st-gen keystore, verifying the result of the write
+    HSMSramRefreshKeys = 0xd4,
+    /// Query the tamper detection status of the 2nd-gen keystore
+    HSMSramQueryTamperState = 0xd5,
+    /// Response sent by HSM to tamper-detection query when 2nd-gen keystore is tamper free
+    HSMSramTamperFree = 0xd6,
+    /// Response sent by HSM to tamper-detection query when tampering detected
+    HSMSramTamperingDetected = 0xd7,
+    /// Reset the tamper detection status of the 2nd-gen keystore
+    /// (required after a tamper is detected before any subsequent key will actually affect the key data)
+    HSMSramResetTamper = 0xd8,
+
     /// Set the HSM to tamper-detect mode. CANNOT BE UNDONE BY THE FUNCTIONARY.
     TamperDetectEnable = 0xe0,
     /// A challenge nonce given by the HSM while in tamper detect mode
@@ -205,6 +233,16 @@ impl Command {
             0x45 => Ok(Command::HSMUpdateACK),
             0x46 => Ok(Command::HSMUpdateNACK),
 
+            0xd0 => Ok(Command::HSMSramQueryStatus),
+            0xd1 => Ok(Command::HSMSramStatusResponse),
+            0xd2 => Ok(Command::HSMSramAddEntropy),
+            0xd3 => Ok(Command::HSMSramCompareKeys),
+            0xd4 => Ok(Command::HSMSramRefreshKeys),
+            0xd5 => Ok(Command::HSMSramQueryTamperState),
+            0xd6 => Ok(Command::HSMSramTamperFree),
+            0xd7 => Ok(Command::HSMSramTamperingDetected),
+            0xd8 => Ok(Command::HSMSramResetTamper),
+
             0xe0 => Ok(Command::TamperDetectEnable),
             0xe1 => Ok(Command::TamperDetectChallenge),
             0xe2 => Ok(Command::TamperDetectResponse),
@@ -223,6 +261,14 @@ impl Command {
             _ => Err(Error::BadCommand(b))
         }
     }
+}
+
+#[test]
+fn command_round_trip() {
+    for command in Command::iter() {
+        assert!(command == Command::from_byte(command as u8).unwrap_or_else(|_| panic!("no round trip for {}", command)));
+    }
+
 }
 
 impl Command {
@@ -270,6 +316,16 @@ impl Command {
             Command::HSMUpdate => "hsm_update",
             Command::HSMUpdateACK => "hsm_update_ack",
             Command::HSMUpdateNACK => "hsm_update_nack",
+
+            Command::HSMSramQueryStatus => "hsm_sram_query_status",
+            Command::HSMSramStatusResponse => "hsm_sram_status_response",
+            Command::HSMSramAddEntropy => "hsm_sram_add_entropy",
+            Command::HSMSramRefreshKeys => "hsm_sram_refresh_keys",
+            Command::HSMSramCompareKeys => "hsm_sram_compare_keys",
+            Command::HSMSramQueryTamperState => "hsm_sram_query_tamper_state",
+            Command::HSMSramTamperFree => "hsm_sram_tamper_free",
+            Command::HSMSramTamperingDetected => "hsm_sram_tampering_detected",
+            Command::HSMSramResetTamper => "hsm_sram_reset_tamper",
 
             Command::TamperDetectEnable => "tamper_detect_enable",
             Command::TamperDetectChallenge => "tamper_detect_challenge",

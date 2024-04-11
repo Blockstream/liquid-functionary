@@ -91,10 +91,6 @@ pub struct Node {
     pub n_main_outputs: usize,
     /// How many peers must precommit to a transaction before we'll sign it
     pub precommit_threshold: usize,
-
-    /// Allow legacy pre-dynafed ordering in pre-dynafed conditions
-    /// Default: false
-    pub allow_pre_dynafed_ordering: Option<bool>,
 }
 
 /// Consensus parameter entry

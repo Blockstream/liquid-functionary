@@ -248,6 +248,7 @@ impl<'a> Iterator for &'a mut MessageQueue {
 mod tests {
     use super::*;
     use bitcoin::secp256k1;
+    use network::NetEncodable;
 
     fn message(
         send_id: peer::Id,
@@ -256,7 +257,7 @@ mod tests {
         msgid: u32,
         nonce: u32,
     ) -> message::Message<message::Validated> {
-        let mut msg_ser = message::tests::CONST_STATUS_ACK.clone();
+        let mut msg_ser = message::tests::CONST_BLOCK_PRECOMMIT.clone();
         assert_eq!(
             message::MESSAGE_VERSION,
             21,
@@ -265,12 +266,12 @@ mod tests {
         );
         msg_ser[68..74].copy_from_slice(&send_id[..]);
         msg_ser[74..80].copy_from_slice(&recv_id[..]);
-        message::NetEncodable::encode(&round, &mut msg_ser[80..84]).unwrap();
-        message::NetEncodable::encode(&msgid, &mut msg_ser[84..88]).unwrap();
-        message::NetEncodable::encode(&nonce, &mut msg_ser[88..92]).unwrap();
+        NetEncodable::encode(&round, &mut msg_ser[80..84]).unwrap();
+        NetEncodable::encode(&msgid, &mut msg_ser[84..88]).unwrap();
+        NetEncodable::encode(&nonce, &mut msg_ser[88..92]).unwrap();
 
-        let msg: message::Message<secp256k1::ecdsa::Signature> = message::NetEncodable::decode(&msg_ser[..])
-            .expect("decoding dummy statusack for msg queue unit tests");
+        let msg: message::Message<secp256k1::ecdsa::Signature> = NetEncodable::decode(&msg_ser[..])
+            .expect("decoding dummy BLOCK_PRECOMMIT for msg queue unit tests");
         msg.drop_signature()
     }
 

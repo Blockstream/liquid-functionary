@@ -43,6 +43,7 @@ pub mod blockchain;
 pub mod hsm;
 pub mod rollouts;
 pub mod util;
+pub mod network;
 
 use std::fmt;
 use std::io::Write;

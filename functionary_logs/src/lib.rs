@@ -41,6 +41,8 @@ extern crate functionary_common as common;
 #[macro_use] pub mod log;
 pub mod functionary;
 pub use self::functionary::*;
+pub mod hsm_log;
+pub use self::hsm_log::*;
 pub mod io_log;
 pub use self::io_log::*;
 pub mod rpc;

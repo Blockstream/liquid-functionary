@@ -1,6 +1,6 @@
 [package]
 name = "parallel_port"
-version = "2.3.0"
+version = "2.4.1"
 authors = ["Blockstream <support@blockstream.com>"]
 description = "Rust port of the HSM parallel port multiplexer"
 edition = "2018"
@@ -14,7 +14,7 @@ path = "src/main.rs"
 anyhow = "1.0.33"
 bitcoin = { version = "0.31.1" }
 byteorder = "0.3"
-clap = "2.33.0"
+clap = "4.4.11"
 nix = "0.14.1"
 serde = "1.0"
 serde_derive = "1.0"

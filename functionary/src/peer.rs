@@ -35,7 +35,6 @@ use watchman::{fee, transaction};
 use watchman::blockchain::OutputCounter;
 
 pub use common::PeerId as Id;
-use common::rollouts::ROLLOUTS;
 
 /// Data associated to a peer, obtained from the configuration file
 #[derive(Clone, PartialEq, Eq, Debug, Deserialize)]
@@ -613,39 +612,13 @@ impl<P: PartialEq, S> PeerManager<P, S> {
         peers_seen: Vec<Id>,
         message: String,
     ) {
-        if ROLLOUTS.status_ack_elim != common::rollouts::StatusAckElim::Phase3 {
-            let msgid = self.next_msgid();
-            if ROLLOUTS.broadcast == common::rollouts::Broadcast::Phase3 {
-                self.send_message(Message::status_blocksigner_pre_seen(
-                    stage, Id::ZERO, msgid, peer_keys.clone(), dynafed_params.clone(),
-                    sidechain_tip, round_count, message.clone(),
-                ));
-            } else {
-                for (id, _) in self.statuses.without_me() {
-                    self.send_message(Message::status_blocksigner_pre_seen(
-                        stage, id, msgid, peer_keys.clone(), dynafed_params.clone(),
-                        sidechain_tip, round_count, message.clone(),
-                    ));
-                }
-            }
-        }
 
-        if ROLLOUTS.status_ack_elim != common::rollouts::StatusAckElim::Phase1 {
-            let msgid = self.next_msgid();
-            if ROLLOUTS.broadcast == common::rollouts::Broadcast::Phase3  {
-                self.send_message(Message::status_blocksigner(
-                    stage, Id::ZERO, msgid, peer_keys.clone(), dynafed_params.clone(),
-                    sidechain_tip, round_count, peers_seen.clone(), message.clone(),
-                ));
-            } else {
-                for (id, _) in self.statuses.without_me() {
-                    self.send_message(Message::status_blocksigner(
-                        stage, id, msgid, peer_keys.clone(), dynafed_params.clone(),
-                        sidechain_tip, round_count, peers_seen.clone(), message.clone(),
-                    ));
-                }
-            }
-        }
+        let msgid = self.next_msgid();
+
+        self.send_message(Message::status_blocksigner(
+            stage, msgid, peer_keys.clone(), dynafed_params.clone(),
+            sidechain_tip, round_count, peers_seen.clone(), message.clone(),
+        ));
     }
 
     /// Send a `StatusWatchman` to every peer
@@ -668,86 +641,26 @@ impl<P: PartialEq, S> PeerManager<P, S> {
         peers_seen: Vec<Id>,
         message: String,
     ) {
-        if ROLLOUTS.status_ack_elim != common::rollouts::StatusAckElim::Phase3 {
-            let msgid = self.next_msgid();
-            if ROLLOUTS.broadcast == common::rollouts::Broadcast::Phase3 {
-                self.send_message(Message::status_watchman(
-                    stage, Id::ZERO, msgid, peer_keys.clone(), mainchain_hash,
-                    sidechain_hash, change_spk_hash, n_mainchain_confirms, n_sidechain_confirms,
-                    round_count, fee_pool_summary, n_pending_transactions, output_counter,
-                    percentiles, pending_input_value, pending_change_value, peers_seen.clone(),
-                    message.clone(),
-                ));
-            } else {
-                for (id, _) in self.statuses.without_me() {
-                    self.send_message(Message::status_watchman_pre_seen(
-                        stage, id, msgid, peer_keys.clone(), mainchain_hash,
-                        sidechain_hash, change_spk_hash, n_mainchain_confirms, n_sidechain_confirms,
-                        round_count, fee_pool_summary, n_pending_transactions, output_counter,
-                        percentiles, pending_input_value, pending_change_value, message.clone(),
-                    ));
-                }
-            }
-        }
-
-        if ROLLOUTS.status_ack_elim != common::rollouts::StatusAckElim::Phase1 {
-            let msgid = self.next_msgid();
-            if ROLLOUTS.broadcast == common::rollouts::Broadcast::Phase3  {
-                self.send_message(Message::status_watchman(
-                    stage, Id::ZERO, msgid, peer_keys.clone(), mainchain_hash,
-                    sidechain_hash, change_spk_hash, n_mainchain_confirms, n_sidechain_confirms,
-                    round_count, fee_pool_summary, n_pending_transactions, output_counter,
-                    percentiles, pending_input_value, pending_change_value, peers_seen.clone(),
-                    message.clone(),
-                ));
-            } else {
-                for (id, _) in self.statuses.without_me() {
-                    self.send_message(Message::status_watchman(
-                        stage, id, msgid, peer_keys.clone(), mainchain_hash,
-                        sidechain_hash, change_spk_hash, n_mainchain_confirms, n_sidechain_confirms,
-                        round_count, fee_pool_summary, n_pending_transactions, output_counter,
-                        percentiles, pending_input_value, pending_change_value, peers_seen.clone(),
-                        message.clone(),
-                    ));
-                }
-            }
-        }
-    }
-
-    /// Broadcast a `StatusAck` message
-    pub fn broadcast_status_ack(&self, stage: RoundStage) {
         let msgid = self.next_msgid();
-        if ROLLOUTS.broadcast == common::rollouts::Broadcast::Phase3 {
-            self.send_message(Message::status_ack(stage, Id::ZERO, msgid));
-        } else {
-            for (id, _) in self.statuses.without_me() {
-                self.send_message(Message::status_ack(stage, id, msgid));
-            }
-        }
+        self.send_message(Message::status_watchman(
+            stage, msgid, peer_keys.clone(), mainchain_hash,
+            sidechain_hash, change_spk_hash, n_mainchain_confirms, n_sidechain_confirms,
+            round_count, fee_pool_summary, n_pending_transactions, output_counter,
+            percentiles, pending_input_value, pending_change_value, peers_seen.clone(),
+            message.clone(),
+        ));
     }
 
     /// Broadcast an unsigned block
     pub fn broadcast_unsigned_block(&self, stage: RoundStage, block: &elements::Block) {
         let msgid = self.next_msgid();
-        if ROLLOUTS.broadcast == common::rollouts::Broadcast::Phase3 {
-            self.send_message(Message::unsigned_block(stage, Id::ZERO, msgid, block.clone()));
-        } else {
-            for (id, _) in self.statuses.without_me() {
-                self.send_message(Message::unsigned_block(stage, id, msgid, block.clone()));
-            }
-        }
+        self.send_message(Message::unsigned_block(stage, msgid, block.clone()));
     }
 
     /// Broadcast a precommitment to signing a block
     pub fn broadcast_block_precommit(&self, stage: RoundStage, blockhash: elements::BlockHash) {
         let msgid = self.next_msgid();
-        if ROLLOUTS.broadcast == common::rollouts::Broadcast::Phase3 {
-            self.send_message(Message::block_precommit(stage, Id::ZERO, msgid, blockhash));
-        } else {
-            for (id, _) in self.statuses.without_me() {
-                self.send_message(Message::block_precommit(stage, id, msgid, blockhash));
-            }
-        }
+        self.send_message(Message::block_precommit(stage, msgid, blockhash));
     }
 
     /// Send a block signature to all other peers
@@ -758,13 +671,7 @@ impl<P: PartialEq, S> PeerManager<P, S> {
         signature: secp256k1::ecdsa::Signature,
     ) {
         let msgid = self.next_msgid();
-        if ROLLOUTS.broadcast == common::rollouts::Broadcast::Phase3 {
-            self.send_message(Message::block_signature(stage, Id::ZERO, msgid, blockhash, signature));
-        } else {
-            for (id, _) in self.statuses.without_me() {
-                self.send_message(Message::block_signature(stage, id, msgid, blockhash, signature));
-            }
-        }
+        self.send_message(Message::block_signature(stage, msgid, blockhash, signature));
     }
 
     /// Broadcast a transaction proposal
@@ -774,25 +681,13 @@ impl<P: PartialEq, S> PeerManager<P, S> {
         proposal: &transaction::ConcreteProposal,
     ) {
         let msgid = self.next_msgid();
-        if ROLLOUTS.broadcast == common::rollouts::Broadcast::Phase3 {
-            self.send_message(Message::tx_proposal(stage, Id::ZERO, msgid, proposal.clone()));
-        } else {
-            for (id, _) in self.statuses.without_me() {
-                self.send_message(Message::tx_proposal(stage, id, msgid, proposal.clone()));
-            }
-        }
+        self.send_message(Message::tx_proposal(stage, msgid, proposal.clone()));
     }
 
     /// Broadcast a precommitment to signing a transaction
     pub fn broadcast_tx_precommit(&self, stage: RoundStage, txid: bitcoin::Txid) {
         let msgid = self.next_msgid();
-        if ROLLOUTS.broadcast == common::rollouts::Broadcast::Phase3 {
-            self.send_message(Message::tx_precommit(stage, Id::ZERO, msgid, txid));
-        } else {
-            for (id, _) in self.statuses.without_me() {
-                self.send_message(Message::tx_precommit(stage, id, msgid, txid));
-            }
-        }
+        self.send_message(Message::tx_precommit(stage, msgid, txid));
     }
 
     /// Broadcast signatures on a transaction proposal
@@ -802,25 +697,13 @@ impl<P: PartialEq, S> PeerManager<P, S> {
         sigs: &transaction::TransactionSignatures,
     ) {
         let msgid = self.next_msgid();
-        if ROLLOUTS.broadcast == common::rollouts::Broadcast::Phase3 {
-            self.send_message(Message::tx_signatures(stage, Id::ZERO, msgid, sigs.clone()));
-        } else {
-            for (id, _) in self.statuses.without_me() {
-                self.send_message(Message::tx_signatures(stage, id, msgid, sigs.clone()));
-            }
-        }
+        self.send_message(Message::tx_signatures(stage, msgid, sigs.clone()));
     }
 
     /// Broadcast an `Idle` message
     pub fn broadcast_idle(&self, stage: RoundStage) {
         let msgid = self.next_msgid();
-        if ROLLOUTS.broadcast == common::rollouts::Broadcast::Phase3 {
-            self.send_message(Message::idle(stage, Id::ZERO, msgid));
-        } else {
-            for (id, _) in self.statuses.without_me() {
-                self.send_message(Message::idle(stage, id, msgid));
-            }
-        }
+        self.send_message(Message::idle(stage, msgid));
     }
 }
 

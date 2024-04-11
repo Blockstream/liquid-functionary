@@ -45,12 +45,11 @@ use elements::confidential::Asset;
 use common::blockchain::extract_commitment;
 use elements::PeginData;
 
-use common::{constants, rollouts, BlockHeight, PeerId};
+use common::{constants, rollouts, BlockHeight, PeerId, network};
 use descriptor::{self, LiquidDescriptor, TweakableDescriptor};
 use common::hsm;
 use common::rollouts::ROLLOUTS;
 use logs::ProposalError;
-use message;
 use peer;
 use rpc::{self, BitcoinRpc, ElementsRpc};
 use utils::{self, HeightIterator};
@@ -213,9 +212,9 @@ impl OutputCounter {
     }
 }
 
-impl message::NetEncodable for OutputCounter {
+impl network::NetEncodable for OutputCounter {
     /// Serializes the output counter as a network message payload
-    fn encode<W: io::Write>(&self, mut w: W) -> Result<usize, message::Error> {
+    fn encode<W: io::Write>(&self, mut w: W) -> Result<usize, network::Error> {
         w.write_u64::<LittleEndian>(self.current as u64)?;
         w.write_u64::<LittleEndian>(self.current_uneconomical as u64)?;
         w.write_u64::<LittleEndian>(self.available as u64)?;
@@ -226,7 +225,7 @@ impl message::NetEncodable for OutputCounter {
     }
 
     /// Parses an output counter from a network message buffer
-    fn decode<R: io::Read>(mut r: R) -> Result<Self, message::Error> {
+    fn decode<R: io::Read>(mut r: R) -> Result<Self, network::Error> {
         Ok(OutputCounter {
             current: r.read_u64::<LittleEndian>()? as usize,
             current_uneconomical: r.read_u64::<LittleEndian>()? as usize,
@@ -2624,7 +2623,7 @@ pub mod tests {
             &signers,
             &vec![],
         ).expect("pegout processing tx to work");
-        assert_eq!(proposal.inputs.len(), 1);
+        assert_eq!(proposal.inputs.len(), 2);
         assert_eq!(proposal.pegouts.len(), 1);
         assert_eq!(proposal.change.len(), 1);
         assert!(manager.check_proposal(&proposal).is_ok());

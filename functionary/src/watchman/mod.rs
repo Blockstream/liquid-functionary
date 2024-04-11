@@ -886,16 +886,7 @@ impl rotator::Rotator for Watchman {
             log!(Error, "failed to update peer list: {}", e);
         }
 
-        // Use legacy ordering as long as the legacy wm descriptor is active (and legacy ordering
-        // allowed).
-        let use_legacy_ordering = match self.config.node.allow_pre_dynafed_ordering {
-            Some(true) => !self.blockchain_manager.consensus().wm_transition_made(),
-            _ => false,
-        };
-        log!(Debug, "use_legacy_ordering: {}", use_legacy_ordering);
-
         update_fn(::dynafed::UpdateNotif {
-            use_legacy_ordering: use_legacy_ordering,
             peers: self.peers.clone(),
         });
     }
@@ -1065,10 +1056,6 @@ impl rotator::Rotator for Watchman {
     // React to stage 2 of a round
     fn round_stage2(&mut self, round_stage: RoundStage) {
         slog!(WatchmanStartStage);
-
-        if ROLLOUTS.status_ack_elim != common::rollouts::StatusAckElim::Phase3 {
-            self.peer_mgr.broadcast_status_ack(round_stage);
-        }
 
         // Broadcast some message depending on our current state
         self.state = match mem::replace(&mut self.state, State::Idle) {
@@ -1445,16 +1432,6 @@ impl rotator::Rotator for Watchman {
                     self.peer_mgr.status_mismatch(peer, reason);
                 } else {
                     self.peer_mgr.update_from_status(peer, header_time, round_count, message);
-                }
-            }
-
-            // ** status ack **
-            message::Payload::StatusAck => {
-                if ROLLOUTS.status_ack_elim != common::rollouts::StatusAckElim::Phase3 {
-                    slog!(KickWatchdogForStatusAck, peer: peer);
-                    self.peer_mgr.send_network_watchdog_kick(peer);
-                } else {
-                    slog!(ReceivedStatusAck, peer: peer);
                 }
             }
 

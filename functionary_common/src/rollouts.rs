@@ -50,92 +50,9 @@ impl Default for HsmCsvTweak {
     }
 }
 
-/// Migration to make our network a broadcast network again.
-///
-/// The phases of this rollout are intended to coincide with those of the
-/// statusack message elimination rollout.
-///
-/// Old behavior:
-/// - nodes send messages directed to individual peers
-/// - nodes drop messages not intended for themselves
-///
-/// When this is cleaned up, the receiver field will no longer have any
-/// semantic meaning. There are two options:
-/// 1. it can be removed from the struct and in (de-)serialization zeroes
-///    can be placed in it's place
-/// 2. the field can be kept in the header struct with a name like
-///    `unused_field_1` and it can be otherwise ignored. This makes sure that
-///    it can be repurposed without losing roundtrippability.
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
-#[cfg_attr(feature = "serde", derive(Deserialize, Serialize))]
-pub enum Broadcast {
-    /// In this phase, nodes
-    /// - still send messages directed to each individual peer, but
-    ///   use the exact same msgid on the identical message directed to each peer
-    Phase1,
-
-    /// In this phase, nodes
-    /// - start considering all messages as directed to themselves, dropping
-    ///   duplicates using the msgid mechanism
-    Phase2,
-
-    /// In this phase, nodes
-    /// - will send each message only once, with a zeroed out recipient
-    ///
-    /// Additionally,
-    /// - the msg recipient field can be removed and ignored on parsing so that
-    ///   it can be reused later for another purpose
-    Phase3,
-}
-
-impl Default for Broadcast {
-    fn default() -> Self {
-        Broadcast::Phase3
-    }
-}
-
-/// The status-ack message is the only message that doesn't work well in a
-/// network with broadcast topology. For this reason, we'll be eliminating it,
-/// in favor of acking messages inside our own status message the next round.
-/// In a new version of the status message, we will mention all the peers we
-/// have received messages from last round.
-///
-/// Old behavior:
-/// - nodes send a peer-addressed status-ack after receiving a peer's status
-/// - nodes only kick the network watchdog for a peer when receiving a status-ack
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
-#[cfg_attr(feature = "serde", derive(Deserialize, Serialize))]
-pub enum StatusAckElim {
-    /// In this phase, nodes will
-    /// - no longer send status-acks when receiving a status
-    /// - broadcast a (fake) status-ack in round-stage2
-    /// - still kick their watchdog when receiving status-acks
-    /// - send only old status messages
-    /// - also kick their watchdog for in-status acks when they are present in the new status message
-    Phase1,
-
-    /// In this phase, nodes start sending new status messages
-    Phase2,
-
-    /// In this phase, nodes will
-    /// - stop sending status-acks
-    /// - stop sending old status messages (they can also be removed)
-    Phase3,
-}
-
-impl Default for StatusAckElim {
-    fn default() -> Self {
-        StatusAckElim::Phase3
-    }
-}
-
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 #[cfg_attr(feature = "serde", derive(Deserialize, Serialize))]
 pub struct Rollouts {
-    #[cfg_attr(feature = "serde", serde(default))]
-    pub broadcast: Broadcast,
-    #[cfg_attr(feature = "serde", serde(default))]
-    pub status_ack_elim: StatusAckElim,
     #[cfg_attr(feature = "serde", serde(default))]
     pub hsm_csv_tweak: HsmCsvTweak,
 }
@@ -143,8 +60,6 @@ pub struct Rollouts {
 impl Default for Rollouts {
     fn default() -> Self {
         Rollouts {
-            broadcast: Default::default(),
-            status_ack_elim: Default::default(),
             hsm_csv_tweak: Default::default()
         }
     }

@@ -30,11 +30,9 @@ use bitcoin::hashes::{sha256d, Hash};
 use bitcoin::secp256k1::{self, Secp256k1};
 use time::now_utc;
 
-use common::PeerId as Id;
-use common::rollouts;
-use common::rollouts::ROLLOUTS;
+use common::{network, network::NetEncodable};
 use dynafed;
-use message::{self, NetEncodable};
+use message;
 use peer;
 use rotator::MainCtrl;
 use utils;
@@ -59,7 +57,7 @@ pub enum Error {
     /// Sending-thread watchdog died (did not receive ACKs in time)
     WatchdogDied,
     /// The message itself was bad
-    Message(message::Error)
+    Message(network::Error)
 }
 
 impl fmt::Display for Error {
@@ -74,8 +72,8 @@ impl fmt::Display for Error {
 }
 
 #[doc(hidden)]
-impl From<message::Error> for Error {
-    fn from(e: message::Error) -> Error {
+impl From<network::Error> for Error {
+    fn from(e: network::Error) -> Error {
         Error::Message(e)
     }
 }
@@ -372,23 +370,9 @@ impl Router {
 
     /// Send a message to the appropriate threads: the target of the
     /// message, and both relay peers
-    pub fn dispatch(&self, sender: peer::Id, msg: message::Message<secp256k1::ecdsa::Signature>) {
-        if msg.header().receiver == Id::ZERO {
-            for (peer_id, _peer) in self.peers.without_me() {
-                self.send_msg_to_peer_id(peer_id, msg.clone());
-            }
-        } else {
-            // Send directly
-            self.send_msg_to_peer_id(msg.header().receiver, msg.clone());
-
-            // Send to relays
-            let (relay_1, relay_2) = self.relay_peers(sender, msg.header().receiver, &msg.header().hash.as_ref());
-            if relay_1 != sender && relay_1 != self.peers.my_id() {
-                self.send_msg_to_peer_id(relay_1, msg.clone());
-            }
-            if relay_2 != sender && relay_2 != self.peers.my_id() {
-                self.send_msg_to_peer_id(relay_2, msg.clone());
-            }
+    pub fn dispatch(&self, msg: message::Message<secp256k1::ecdsa::Signature>) {
+        for (peer_id, _peer) in self.peers.without_me() {
+            self.send_msg_to_peer_id(peer_id, msg.clone());
         }
     }
 
@@ -426,62 +410,44 @@ impl Router {
     }
 
     /// Relay the message to the relay peers.
-    fn relay(&self, msg: message::Message<secp256k1::ecdsa::Signature>, sender: peer::Id, rcvr: peer::Id) {
+    fn relay(&self, msg: message::Message<secp256k1::ecdsa::Signature>, sender: peer::Id) {
         // This is quite annoying, but logging is easier split up.
         let now = now_utc().to_timespec();
-        slog!(ReceiveForRelay, sender: msg.header().sender, target: msg.header().receiver,
+        slog!(ReceiveForRelay, sender: msg.header().sender, target: peer::Id::ZERO,
             version: msg.header().version, round_no: msg.header().round,
             nonce: msg.header().nonce, skew_ms: (now - msg.header().time).num_milliseconds(),
             command: msg.header().command.text().into(), length: msg.header().length,
             hash: msg.header().hash.into(),
         );
 
-        if rcvr == Id::ZERO {
-            let mut peers_sent:std::collections::HashSet<common::PeerId> = Default::default();
-            // This is a relay of a broadcast message, we need to be careful who we send it to
-            for (peer_id, _peer) in self.peers.without_me() {
-                if peer_id == sender {
-                    // We should never relay back the message originator
-                    continue;
-                }
-                // Choose two backups who relay; others do not.
-                let (id1, id2) = self.relay_peers(sender, peer_id, &msg.header().hash.as_ref());
-                log!(Trace, "relay_peers for message {}: {}, {} (sender: {}, receiver: {}, us: {}): relay:{}",
-                    &msg.header().hash, id1, id2, sender, peer_id, self.peers.my_id(),
-                    id1 == self.peers.my_id() || id2 == self.peers.my_id(),
-                );
-                if id1 == self.peers.my_id() || id2 == self.peers.my_id() {
-                    log!(Trace, "Relaying (relay nodes {} and {})", id1, id2);
-                    if ! peers_sent.contains(&peer_id) {
-                        self.send_msg_to_peer_id(peer_id, msg.clone());
-                        peers_sent.insert(peer_id);
-                    }
-                    let other_relay = if id1 == self.peers.my_id() {id2} else {id1};
-                    if other_relay != sender {
-                        log!(Trace, "Sending message to the other relay node {})", other_relay);
-                        if ! peers_sent.contains(&other_relay) {
-                            self.send_msg_to_peer_id(other_relay, msg.clone());
-                            peers_sent.insert(other_relay);
-                        }
-                    }
-                }
+
+        let mut peers_sent:std::collections::HashSet<common::PeerId> = Default::default();
+        // This is a relay of a broadcast message, we need to be careful who we send it to
+        for (peer_id, _peer) in self.peers.without_me() {
+            if peer_id == sender {
+                // We should never relay back the message originator
+                continue;
             }
-        } else {
-            // Once phase 3 is rolled out we can remove this branch
-            let _ = common::rollouts::Broadcast::Phase3;
             // Choose two backups who relay; others do not.
-            let (id1, id2) = self.relay_peers(sender, rcvr, &msg.header().hash.as_ref());
+            let (id1, id2) = self.relay_peers(sender, peer_id, &msg.header().hash.as_ref());
             log!(Trace, "relay_peers for message {}: {}, {} (sender: {}, receiver: {}, us: {}): relay:{}",
-                &msg.header().hash, id1, id2, sender, rcvr, self.peers.my_id(),
+                &msg.header().hash, id1, id2, sender, peer_id, self.peers.my_id(),
                 id1 == self.peers.my_id() || id2 == self.peers.my_id(),
             );
             if id1 == self.peers.my_id() || id2 == self.peers.my_id() {
                 log!(Trace, "Relaying (relay nodes {} and {})", id1, id2);
-                self.dispatch(sender, msg);
-            } else {
-                log!(Error, "received {:?} msg from {} intended for {} that I'm not a relayer of",
-                    msg.header().command, msg.header().sender, msg.header().receiver,
-                );
+                if ! peers_sent.contains(&peer_id) {
+                    self.send_msg_to_peer_id(peer_id, msg.clone());
+                    peers_sent.insert(peer_id);
+                }
+                let other_relay = if id1 == self.peers.my_id() {id2} else {id1};
+                if other_relay != sender {
+                    log!(Trace, "Sending message to the other relay node {})", other_relay);
+                    if ! peers_sent.contains(&other_relay) {
+                        self.send_msg_to_peer_id(other_relay, msg.clone());
+                        peers_sent.insert(other_relay);
+                    }
+                }
             }
         }
     }
@@ -553,7 +519,7 @@ impl Router {
                     NetworkCtrl::Send(message) => {
                         log!(Trace, "Network thread sending {:?}", message.header());
                         let signed = message.sign(&self.signing_context);
-                        self.dispatch(self.peers.my_id(), signed);
+                        self.dispatch(signed);
                     },
                     NetworkCtrl::WatchdogKick(id) => {
                         for conn in &self.peers[id].outgoing {
@@ -606,25 +572,17 @@ impl Router {
                             );
                             continue;
                         }
-                        let (sndr_id, rcvr_id) = (msg.header().sender, msg.header().receiver);
+                        let sndr_id = msg.header().sender;
 
                         if sndr_id == self.peers.my_id() {
                             log!(Error, "received message from myself??: {:?}", msg.header());
                             continue;
                         }
 
-                        // Check whether we are a relayer for this message.
-                        // Either it is not for ourselves, or broadcast
-                        if rcvr_id != self.peers.my_id() {
-                            // Relay the message only if the nonce is increasing during this round.
-                            if incoming_queue.record_nonce(sndr_id, msg.header().nonce) {
-                                self.relay(msg.clone(), sndr_id, rcvr_id);
-                            }
 
-                            // From phase 2 no longer exit here.
-                            if ROLLOUTS.broadcast == rollouts::Broadcast::Phase1 {
-                                continue;
-                            }
+                        // Relay the message only if the nonce is increasing during this round.
+                        if incoming_queue.record_nonce(sndr_id, msg.header().nonce) {
+                            self.relay(msg.clone(), sndr_id);
                         }
 
                         // Log when it's an unknown message
@@ -666,8 +624,7 @@ impl Router {
 mod tests {
     use std::collections::HashSet;
     use bitcoin::secp256k1::SignOnly;
-    use common::rollouts::{Broadcast, Rollouts, set_rollouts_on_startup, StatusAckElim};
-    use common::{PeerId, RoundStage};
+    use common::RoundStage;
     use message::Message;
     use peer::{List, Map, Peer};
     use super::*;
@@ -687,7 +644,7 @@ mod tests {
     }
 
     struct TestPeer {
-        id: Id,
+        id: peer::Id,
         comm_sk: secp256k1::SecretKey,
         peer_data: Peer,
         router: Router,
@@ -746,15 +703,10 @@ mod tests {
         test_peers
     }
 
-    /// Test the new broadcast relay heuristic used in Phase3 of the Broadcast rollout
+    /// Test the new broadcast relay heuristic
     /// To see the stdout output run this test with --nocapture i.e. `cargo test broadcast_relay_heuristic -- --nocapture`
     #[test]
     fn broadcast_relay_heuristic() {
-        set_rollouts_on_startup(Rollouts {
-            broadcast: Broadcast::Phase3,
-            status_ack_elim: StatusAckElim::Phase3,
-            hsm_csv_tweak: Default::default(),
-        });
         for i in 1..=15 {
             broadcast_relay_heuristic_peers(i);
         }
@@ -776,7 +728,7 @@ mod tests {
         };
 
         let original_messages_sent =
-            dispatch_and_relay_message(peers[0].id, PeerId::ZERO, &peers, &signing_context);
+            dispatch_and_relay_message(peers[0].id, &peers, &signing_context);
 
         let relayed_messages_sent = count_relayed_messages(&peers);
 
@@ -821,39 +773,6 @@ mod tests {
         assert!(relayed_messages_sent as i32 <= expected_relay_sent_max);
     }
 
-    /// Run the relay measurement test using the Phase1 broadcast strategy
-    /// NOTE: This test is commented out because it uses `set_rollouts_on_startup` which cannot be called
-    /// twice in a given context and `broadcast_relay_heuristic` also calls this method and will cause a panic
-    // #[test]
-    // fn broadcast_relay_heuristic_phase1() {
-    //     set_rollouts_on_startup(Rollouts {
-    //         broadcast: Broadcast::Phase1,
-    //         status_ack_elim: StatusAckElim::Phase1,
-    //         hsm_csv_tweak: Default::default()
-    //     });
-    //
-    //     let secp = Secp256k1::signing_only();
-    //
-    //     let peers = generate_test_peers(10, &secp);
-    //
-    //     println!("Network contains {} peers", peers.len());
-    //
-    //     let signing_context = message::SigningContext {
-    //         secp: secp,
-    //         comm_sk: peers[0].comm_sk.clone(),
-    //         my_id: peers[0].id,
-    //     };
-    //
-    //     let mut original_messages_sent = 0;
-    //     for i in 1..peers.len() {
-    //         original_messages_sent += dispatch_and_relay_message(peers[0].id, peers[i].id, &peers, &signing_context);
-    //     }
-    //
-    //     let relayed_messages_sent = count_relayed_messages(&peers);
-    //
-    //     println!("Original messages sent {} - Relay messages sent {} - Total {}", original_messages_sent, relayed_messages_sent, original_messages_sent + relayed_messages_sent);
-    // }
-
     /// Dispatch a message to a receiver using the router::dispatch method. Then go through the outgoing
     /// send queues trigger the `relay` method on the recipient routers as if they received the message
     /// `Returns`: the number of originator messages sent
@@ -861,14 +780,12 @@ mod tests {
     ///                 from that sender. This check is in the `run(...)` method of the Router so this
     ///                 test just assumes this check is enforced.
     fn dispatch_and_relay_message(
-        sender: Id,
-        receiver: Id,
+        sender: peer::Id,
         peers: &Vec<TestPeer>,
         signing_context: &message::SigningContext<secp256k1::SignOnly>,
     ) -> usize {
         let msg = Message::status_blocksigner(
             RoundStage::default(),
-            receiver,
             0,
             vec![],
             vec![],
@@ -884,7 +801,7 @@ mod tests {
         let sending_peer = peers.iter().find(|p| p.id == sender).unwrap();
 
         let mut msg_recipients = HashSet::new();
-        sending_peer.router.dispatch(sending_peer.id, msg.clone());
+        sending_peer.router.dispatch(msg.clone());
         for (id, to_peer) in sending_peer.router.peers.iter() {
             for t in to_peer.outgoing.iter() {
                 if t.queue().len() > 0 {
@@ -901,17 +818,15 @@ mod tests {
             }
         }
 
+        // Now all the peers that received the broadcast will check for relay
         for peer in peers.iter().filter(|p| p.id != sender) {
             if msg_recipients.contains(&peer.id) {
                 println!(
-                    "Original message from Peer {} received by Peer {} - Relaying: {}",
+                    "Original message from Peer {} received by Peer {}",
                     sender,
                     peer.id,
-                    peer.id != msg.header().receiver
                 );
-                if peer.id != msg.header().receiver {
-                    peer.router.relay(msg.clone(), msg.header().sender, msg.header().receiver);
-                }
+                peer.router.relay(msg.clone(), msg.header().sender);
             }
         }
 

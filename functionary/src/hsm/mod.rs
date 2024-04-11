@@ -34,7 +34,7 @@ use watchman::utxotable::SpendableUtxo;
 
 pub mod message;
 mod local;
-mod liquid;
+pub mod liquid;
 
 /// The chainstate of the watchman HSM.
 #[derive(Debug, Clone, PartialEq, Eq)]

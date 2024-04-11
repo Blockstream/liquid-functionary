@@ -126,10 +126,13 @@ where
                         return Err(format!("duplicate key: {}", key));
                     }
                 }
+            },
+            miniscript::policy::Semantic::Key(_) => {
+                log!(Info, "Descriptor is for a network with a single signer");
+            },
+            _ => {
+                panic!("valid liquid policies have a threshold at age 0");
             }
-            ref other => return Err(format!(
-                "descriptor policy «{:?}» at time 0 is not a multisig", other
-            )),
         }
 
         Ok(())
@@ -462,14 +465,25 @@ impl TweakableDescriptor for Descriptor<tweak::Key> {
     }
 
     fn iter_signing_keys_threshold(&self) -> (FuncKeyIter, usize) {
+
         let policy = self.lift().expect("valid liquid policies are liftable").at_age(bitcoin::Sequence(0));
-        if let miniscript::policy::Semantic::Threshold(k, subs) = policy {
-            let iter = FuncKeyIter {
-                inner: subs.into_iter(),
-            };
-            (iter, k)
-        } else {
-            panic!("valid liquid policies have a threshold at age 0");
+
+        match policy {
+            miniscript::policy::Semantic::Threshold(k, subs) => {
+                let iter = FuncKeyIter {
+                    inner: subs.into_iter(),
+                };
+                (iter, k)
+            },
+            miniscript::policy::Semantic::Key(key) => {
+                let iter = FuncKeyIter {
+                    inner: vec![Semantic::Key(key)].into_iter().into(),
+                };
+                (iter, 1)
+            },
+            _ => {
+                panic!("valid liquid policies have a threshold at age 0");
+            }
         }
     }
 
@@ -513,6 +527,7 @@ impl SpendableDescriptor for Descriptor<tweak::Key> {
     fn can_spend(&self, other: &Self) -> bool {
         let threshold = match other.lift().unwrap().at_age(bitcoin::Sequence(0)) {
             miniscript::policy::Semantic::Threshold(t, _) => t,
+            miniscript::policy::Semantic::Key(_) => 1,
             ref other_policy => panic!("descriptor policy «{:?}» at time 0 is not a multisig", other_policy)
         };
 

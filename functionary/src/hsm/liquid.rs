@@ -68,13 +68,13 @@ impl LiquidHsm {
 
     /// Executes some function on the HSM socket, returning an error if
     /// it cannot be connected to.
-    fn with_opened_socket<F, R>(&self, f: F)
+    pub fn with_opened_socket<F, R>(&self, f: F)
                                 -> Result<R, Error>
                                 where F: FnOnce(UnixStream) -> Result<R, Error> {
         let sock = match UnixStream::connect(&self.socket_path) {
             Ok(stream) => stream,
             Err(e) => {
-                log!(Warn, "Could not connect to socket {:?}",self.socket_path);
+                log!(Warn, "Could not connect to socket {:?}: {}", self.socket_path, e);
                 return Err(Error::Io(e));
             }
         };
@@ -416,7 +416,7 @@ impl SecurityModule for LiquidHsm {
 // Helper functions for serial I/O
 
 /// Actually send a message to the HSM
-fn send_message(mut w: impl Write, msg: &impl Message) -> io::Result<()> {
+pub fn send_message(mut w: impl Write, msg: &impl Message) -> io::Result<()> {
     let mut bytes_written = MAGIC_BYTES.len();
     w.write_all(MAGIC_BYTES)?;
     let header_buf = msg.header().serialize();
@@ -429,7 +429,7 @@ fn send_message(mut w: impl Write, msg: &impl Message) -> io::Result<()> {
 }
 
 /// Read a message from the HSM
-fn read_message(mut r: impl Read, timeout: Option<Duration>) -> Result<(Header, Vec<u8>), Error> {
+pub fn read_message(mut r: impl Read, timeout: Option<Duration>) -> Result<(Header, Vec<u8>), Error> {
     let mut header_buf = [0u8; HEADER_LEN];
     let mut bytes_read: usize = MAGIC_BYTES.len();
     read_and_consume_magic(&mut r, MAGIC_BYTES, timeout.unwrap_or(DEFAULT_HSM_READ_TIMEOUT))?;

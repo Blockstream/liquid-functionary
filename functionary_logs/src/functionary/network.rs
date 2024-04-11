@@ -116,7 +116,7 @@ fn deserialize_nonce<'de, D: serde::Deserializer<'de>>(d: D) -> Result<u32, D::E
 pub struct Header {
     pub version: u32,
     pub sender: String,
-    pub receiver: String,
+    pub _unused_field_1: String,
     pub round: u32,
     pub msgid: u32,
     pub nonce: u32,

@@ -19,6 +19,7 @@
 //!
 
 use functionary::*;
+use hsm_log::*;
 use io_log::*;
 use rpc::*;
 
@@ -29,6 +30,7 @@ use LegacyUnconvertedLogWarn;
 use LegacyUnconvertedLogError;
 use LegacyUnconvertedLogFatal;
 
+#[macro_export]
 macro_rules! impl_log(
     ($log_id:expr, $level:ident, $struct:ident $(::$next:ident)*, $desc:expr) => {
         impl_log!($log_id, $level, $struct$(::$next)*, $desc,);
@@ -290,3 +292,7 @@ impl_log!("F-L002", Info, LegacyUnconvertedLogInfo, "legacy log");
 impl_log!("F-L003", Warn, LegacyUnconvertedLogWarn, "legacy log");
 impl_log!("F-L004", Error, LegacyUnconvertedLogError, "legacy log");
 impl_log!("F-L005", Fatal, LegacyUnconvertedLogFatal, "legacy log");
+
+impl_log!("F-H000", Info, HsmComponentStatus , "HSM component status");
+impl_log!("F-H001", Info, HsmAuditResult, "HSM component audit results");
+impl_log!("F-H002", Error, HsmAuditError, "error while attempting HSM component audit");

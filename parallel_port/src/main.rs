@@ -36,7 +36,7 @@ use crate::serial_manager::SerialPortManager;
 use crate::socket_manager::SocketManager;
 use anyhow::bail;
 use bitcoin::hex::DisplayHex;
-use clap::{App, Arg};
+use clap::Parser;
 use constants::FUNCTIONARY_VERSION;
 use functionary_common::hsm::{Address, Command, MESSAGE_VERSION};
 use std::path::Path;
@@ -48,49 +48,35 @@ use std::ops::Div;
 
 const EXIT_FAILURE: i32 = 1;
 
+#[derive(Parser, Debug)]
+#[command(
+    version,
+    about = "HSM Parallel Port Multiplexer Daemon"
+)]
+struct Args {
+    #[clap(help = "Path to serial port connecting host to HSM")]
+    serial_port: String,
+    #[clap(help = "Directory path where Unix sockets will be created")]
+    sockets_dir: String,
+    #[clap(help = "Set the baud rate of the serial port, will override any config file setting if present")]
+    baud: Option<String>,
+    #[clap(short = 'd', help = "Directory path where the config file is located")]
+    datadir: Option<String>,
+}
+
 fn main_inner() -> anyhow::Result<()> {
-    let matches = App::new("HSM Parallel Port Multiplexer Daemon")
-        .version("0.1.0")
-        .arg(
-            Arg::with_name("serial_port")
-                .index(1)
-                .help("Path to serial port connecting host to HSM")
-                .required(true)
-                .takes_value(true),
-        )
-        .arg(
-            Arg::with_name("sockets_dir")
-                .help("Directory path where Unix sockets will be created")
-                .index(2)
-                .required(true)
-                .takes_value(true),
-        )
-        .arg(Arg::with_name("baud")
-            .help("Set the baud rate of the serial port, will override any config file setting if present")
-            .index(3)
-            .takes_value(true))
-        .arg(
-            Arg::with_name("datadir")
-                .help("Directory path where the config file is located")
-                .required(false)
-                .takes_value(true)
-                .long("datadir"),
-        )
-        .get_matches();
+    let args = Args::parse();
 
-    let (serial_port_path, sockets_dir) =
-        match (matches.value_of("serial_port"), matches.value_of("sockets_dir")) {
-            (Some(serial_port), Some(sockets_dir)) => (serial_port, sockets_dir),
-            (_, _) => bail!("Could not parse command line arguments"),
-        };
+    let serial_port_path = &args.serial_port;
+    let sockets_dir = &args.sockets_dir;
 
-    let mut config = read_configuration(matches.value_of("datadir"));
+    let mut config = read_configuration(args.datadir.as_deref());
 
     functionary_logs::set_logging_context(functionary_logs::LoggingContext::Generic(Default::default()));
     functionary_logs::initialize(config.log_level, None, None, "parallel_port", Box::new(io::stderr()));
 
     // Check if the `baud` command line argument was passed
-    if let Some(baud_str) = matches.value_of("baud") {
+    if let Some(ref baud_str) = args.baud {
         if let Ok(baud_u32) = u32::from_str(baud_str) {
             log!(Info, "Using baud setting from command line argument: {}", baud_u32);
             config.serial_port_baud = baud_u32;

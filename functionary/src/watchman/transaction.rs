@@ -22,16 +22,15 @@ use std::{cell, cmp, fmt, io, mem, ops};
 use std::convert::TryFrom;
 
 use bitcoin::absolute::LockTime;
-use bitcoin::Amount;
+use bitcoin::{Amount, SignedAmount};
 use bitcoin::script::PushBytes;
 use bitcoin::secp256k1::{self, Message, Secp256k1, ecdsa::Signature};
 use bitcoin::sighash::SighashCache;
 
-use common::constants;
+use common::{constants, network};
 use descriptor::LiquidDescriptor;
 use common::hsm;
 use logs::ProposalError;
-use message;
 use peer;
 use tweak;
 use watchman::blockchain::{self, fee};
@@ -94,13 +93,13 @@ impl fmt::Display for TransactionSignatures {
     }
 }
 
-impl message::NetEncodable for TransactionSignatures {
-    fn encode<W: io::Write>(&self, w: W) -> Result<usize, message::Error> {
-        message::NetEncodable::encode(&self.0, w)
+impl network::NetEncodable for TransactionSignatures {
+    fn encode<W: io::Write>(&self, w: W) -> Result<usize, network::Error> {
+        network::NetEncodable::encode(&self.0, w)
     }
 
-    fn decode<R: io::Read>(r: R) -> Result<Self, message::Error> {
-        Ok(TransactionSignatures(message::NetEncodable::decode(r)?))
+    fn decode<R: io::Read>(r: R) -> Result<Self, network::Error> {
+        Ok(TransactionSignatures(network::NetEncodable::decode(r)?))
     }
 }
 
@@ -256,6 +255,7 @@ impl<'a, 'utxo: 'a, 'pegout: 'a> ProposalUpdate<'a, 'utxo, 'pegout> {
     {
         let mut weight = self.proposal.check_signed_weight()?;
         let mut fee = fee_pool.calculate_fee(weight);
+
         fee_pool.validate_fee(weight, fee)?;
         let mut input_amount = self.proposal.input_value();
         let output_amount = self.proposal.output_value();
@@ -265,6 +265,7 @@ impl<'a, 'utxo: 'a, 'pegout: 'a> ProposalUpdate<'a, 'utxo, 'pegout> {
                 self.add_input(utxo);
                 weight = self.proposal.check_signed_weight()?;
                 fee = fee_pool.calculate_fee(weight);
+
                 fee_pool.validate_fee(weight, fee)?;
                 input_amount = self.proposal.input_value();
             } else {
@@ -372,6 +373,11 @@ impl<'utxo, 'pegout> Proposal<'utxo, 'pegout> {
         let spk_len = spk.len();
         let vi_len = bitcoin::VarInt(spk_len as u64).size();
         8 + vi_len + spk_len
+    }
+
+    /// Accessor for the size of a change output
+    pub fn change_txout_size(&self) -> usize {
+        self.change_txout_size
     }
 
     /// Helper to determine the set of additional inputs to include to satisfy
@@ -546,14 +552,14 @@ impl<'utxo, 'pegout> Proposal<'utxo, 'pegout> {
         Ok(())
     }
 
-    /// The amount of change that is left over, if any.
-    /// Returns [None] if there is already not enough change.
-    fn leftover_change(&self, fee_pool: &fee::Pool) -> Option<Amount> {
-        let input = self.input_value();
-        let output = self.output_value();
+    /// The amount of change that is left over.
+    /// Will be negative if the transaction does not balance
+    fn leftover_change(&self, fee_pool: &fee::Pool) -> SignedAmount {
+        let input = self.input_value().to_signed().expect("signed amount");
+        let output = self.output_value().to_signed().expect("signed amount");
         let weight = self.signed_weight();
-        let fee = fee_pool.calculate_fee(weight);
-        input.checked_sub(output + fee)
+        let fee = fee_pool.calculate_fee(weight).to_signed().expect("signed amount");
+        input - output - fee
     }
 
     /// Helper to set the change output(s) to ensure the transaction has
@@ -564,7 +570,9 @@ impl<'utxo, 'pegout> Proposal<'utxo, 'pegout> {
         utxos: I,
         desired_n_main_outputs: usize,
         n_outputs_with_pending: usize,
-    ) where I: Iterator<Item=&'utxo SpendableUtxo> {
+        min_economical_amount: Amount,
+        performing_reclamation: bool,
+    ) -> Result<(), ProposalError> where I: Iterator<Item=&'utxo SpendableUtxo> {
         // Assert that we're calling this function before any other operation
         // that may have affected the change distribution. In particular, we
         // assume that the coin selection put an initial "dummy change" output
@@ -574,8 +582,8 @@ impl<'utxo, 'pegout> Proposal<'utxo, 'pegout> {
         assert!(n_outputs_with_pending >= self.inputs.len(),
                 "{} < {}", n_outputs_with_pending, self.inputs.len());
 
-        let mut extra_change = self.leftover_change(fee_pool)
-            .expect("tx should balance at this point because of call to add_inputs");
+        // Could be negative if the transaction doesn't balance
+        let mut change = self.leftover_change(fee_pool);
 
         // Aside from the one default change output, we might want to add some
         // more change outputs because we want our wallet to have a certain
@@ -584,7 +592,15 @@ impl<'utxo, 'pegout> Proposal<'utxo, 'pegout> {
         let n_outputs = n_outputs_with_pending - self.inputs.len();
         let clamped_desired = desired_n_main_outputs.saturating_sub(constants::N_MAIN_OUTPUTS_RADIUS);
 
-        if n_outputs < clamped_desired {
+        let minimum_change_size = cmp::max(Amount::from_sat(constants::MINIMUM_OPPORTUNISTIC_CHANGE), min_economical_amount);
+
+        if performing_reclamation {
+            log!(Trace, "Performing reclamation so no change adjustment will occur");
+            if change < minimum_change_size.to_signed().expect("signed") {
+                log!(Warn, "Reclaiming UTXO of value {} produces change {} which less than economical amount {} during a reclamation, rejecting proposal", self.input_value(), change, minimum_change_size);
+                return Err(ProposalError::NonEconomicalReclamationProposal(self.input_value()));
+            }
+        } else if n_outputs < clamped_desired {
             let desired_n_change = cmp::min(
                 desired_n_main_outputs - n_outputs,
                 constants::MAXIMUM_CHANGE_OUTPUTS,
@@ -593,8 +609,8 @@ impl<'utxo, 'pegout> Proposal<'utxo, 'pegout> {
             let n_to_add = desired_n_change - 1; // already have one change output
             // (4 weight multiplier and 2 bytes for potential nOut VarInt increase)
             let change_fee = fee_pool.calculate_fee(4 * (2 + n_to_add * self.change_txout_size));
-            let val_to_add = Amount::from_sat(constants::MINIMUM_OPPORTUNISTIC_CHANGE) * n_to_add as u64 + change_fee;
-            if extra_change < val_to_add {
+            let val_to_add =  minimum_change_size.checked_mul(n_to_add as u64).expect("multiply") + change_fee;
+            if change < val_to_add.to_signed().expect("signed") {
                 // Try adding our currently highest-valued UTXO to the
                 // proposal, with the intent of splitting it up.
                 if let Some(max) = utxos.max_by_key(|utxo| utxo.value) {
@@ -604,38 +620,65 @@ impl<'utxo, 'pegout> Proposal<'utxo, 'pegout> {
                         // just added was already going to be added in order
                         // to satisfy a conflict requirement.
 
-                        extra_change = self.leftover_change(fee_pool)
-                            .expect("add_input makes sure input is economical");
+                        change = self.leftover_change(fee_pool);
                     }
                 }
             }
 
             // Add as many change outputs as we can
-            let new_change_val = Amount::from_sat(constants::MINIMUM_OPPORTUNISTIC_CHANGE);
-            while self.change.len() < desired_n_change && extra_change >= new_change_val {
+            let new_change_val = minimum_change_size;
+            while self.change.len() < desired_n_change && change >= new_change_val.to_signed().expect("signed") {
                 // Try to add a new change output and revert in case not ok.
                 if self.add_change(fee_pool, new_change_val).is_err() {
                     break;
                 }
 
-                if let Some(change) = self.leftover_change(fee_pool) {
-                    extra_change = change;
-                } else {
+                let leftover_change = self.leftover_change(fee_pool);
+                if leftover_change.is_negative() {
                     self.change.pop();
                     break;
+                } else {
+                    change = leftover_change;
                 }
             }
+        } else if change < minimum_change_size.to_signed().expect("signed") {
+                // If we are not splitting we still want to make sure the single change output is
+                // larger than the minimal economical amount.
+                // If not we add our currently highest-valued UTXO to the
+                // proposal, we can be fairly sure that this UTXO will be way more than economical
+                if let Some(max) = utxos.max_by_key(|utxo| utxo.value) {
+                    match self.add_input(fee_pool, max) {
+                        Ok(_) => {
+                            // Recompute weight and input value; this should have
+                            // changed, but may not have, e.g. if the input we
+                            // just added was already going to be added in order
+                            // to satisfy a conflict requirement.
+
+                            change = self.leftover_change(fee_pool);
+                            log!(Debug, "Added extra input to make change economical");
+                        }
+                        Err(e) => {
+                            log!(Error, "Failed to add extra input to make change economical: {:?}", e)
+                        }
+                    }
+
+                } else {
+                    log!(Error, "We have run out of spendable UTXO's");
+                }
         }
 
         // Adjust all the change outputs to consume the remainder
         // of the change
-        let change_adj = extra_change / self.change.len() as u64;
+        let mut remaining_change = change
+            .to_unsigned()
+            .expect("must have positive change in a balanced transaction");
+        let change_adj = remaining_change.checked_div(self.change.len() as u64).expect("divide");
         for i in 1..self.change.len() {
             self.change[i] += change_adj;
-            extra_change -= change_adj;
+            remaining_change -= change_adj;
         }
-        self.change[0] += extra_change;
-        debug_assert_eq!(Some(Amount::ZERO), self.leftover_change(fee_pool));
+        self.change[0] += remaining_change;
+        debug_assert_eq!(SignedAmount::ZERO, self.leftover_change(fee_pool));
 
         // Done. Let's do some sanity checks.
         let total_in = self.input_value();
@@ -646,6 +689,7 @@ impl<'utxo, 'pegout> Proposal<'utxo, 'pegout> {
         debug_assert!(fee >= target_fee,
             "final fee of {} undershoots target fee of {}", fee, target_fee,
         );
+        Ok(())
     }
 
     /// Accessor for the number of inputs in the final transaction
@@ -899,20 +943,20 @@ impl ConcreteProposal {
     }
 }
 
-impl message::NetEncodable for ConcreteProposal {
-    fn encode<W: io::Write>(&self, mut w: W) -> Result<usize, message::Error> {
+impl network::NetEncodable for ConcreteProposal {
+    fn encode<W: io::Write>(&self, mut w: W) -> Result<usize, network::Error> {
         let mut len = 0;
-        len += message::NetEncodable::encode(&self.inputs, &mut w)?;
-        len += message::NetEncodable::encode(&self.pegouts, &mut w)?;
-        len += message::NetEncodable::encode(&self.change, &mut w)?;
+        len += network::NetEncodable::encode(&self.inputs, &mut w)?;
+        len += network::NetEncodable::encode(&self.pegouts, &mut w)?;
+        len += network::NetEncodable::encode(&self.change, &mut w)?;
         Ok(len)
     }
 
-    fn decode<R: io::Read>(mut r: R) -> Result<Self, message::Error> {
+    fn decode<R: io::Read>(mut r: R) -> Result<Self, network::Error> {
         Ok(ConcreteProposal {
-            inputs: message::NetEncodable::decode(&mut r)?,
-            pegouts: message::NetEncodable::decode(&mut r)?,
-            change: message::NetEncodable::decode(&mut r)?,
+            inputs: network::NetEncodable::decode(&mut r)?,
+            pegouts: network::NetEncodable::decode(&mut r)?,
+            change: network::NetEncodable::decode(&mut r)?,
         })
     }
 }
@@ -1412,7 +1456,7 @@ mod tests {
         }};}
 
         // This is our intended fee rate.
-        const FEE_RATE: u64 = 1_000; // sats / vkb
+        const FEE_RATE: Amount = Amount::from_sat(1_000); // sats / vkb
 
         let inputs = vec![ utxo!(Amount::from_sat(600_000)) ];
         let utxo_conflict = utxo!(Amount::from_sat(700_000));
@@ -1440,9 +1484,9 @@ mod tests {
             let desired_n = i * constants::N_MAIN_OUTPUTS_RADIUS;
 
             let mut proposal = proposal.clone();
-            let mut fee_pool = fee::Pool::new(Amount::from_sat(FEE_RATE));
+            let mut fee_pool = fee::Pool::new(FEE_RATE);
             fee_pool.add(Amount::from_sat(10_000));
-            proposal.adjust_change(&fee_pool, utxos.iter(), desired_n, 5);
+            let _ = proposal.adjust_change(&fee_pool, utxos.iter(), desired_n, 5, Amount::from_sat(constants::MINIMUM_OPPORTUNISTIC_CHANGE), false);
 
             if *i == 1 {
                 assert_eq!(proposal.change.len(), 1);
@@ -1452,7 +1496,7 @@ mod tests {
 
             let fee = proposal.input_value() - proposal.output_value();
             let vsize = proposal.signed_weight() as u64 / 4;
-            assert!((fee*1000)/vsize - Amount::from_sat(FEE_RATE) <= Amount::from_sat(2)); // allowed to be off by 2
+            assert!((fee*1000)/vsize - FEE_RATE <= Amount::from_sat(2)); // allowed to be off by 2
             // the off by 2 is because total fee and change fee are both rounded up
         }
     }

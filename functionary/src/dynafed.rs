@@ -32,10 +32,6 @@ use peer;
 /// a simple [peer::List].
 #[derive(Debug, Clone)]
 pub struct UpdateNotif {
-    /// Whether this peer list is still based on the original pre-dynafed
-    /// params (and should preserve legacy ordering) or the result of a
-    /// dynafed consensus param (and thus free to use newer ordering)
-    pub use_legacy_ordering: bool,
     /// the actual peers
     pub peers: peer::List,
 }
@@ -45,15 +41,7 @@ impl UpdateNotif {
     ///
     /// Pre-dynafed, this list is ordered by signing key.
     pub fn sorted_peer_list(&self) -> Vec<peer::Id> {
-        if self.use_legacy_ordering {
-            let mut ordered: Vec<(Vec<u8>, peer::Id)> = self.peers.consensus().map(
-                |(id, peer)| (peer.sign_pk.serialize().to_vec(), id)
-            ).collect();
-            ordered.sort();
-            ordered.into_iter().map(|(_, id)| id).collect()
-        } else {
-            self.peers.consensus_ordered_ids()
-        }
+        self.peers.consensus_ordered_ids()
     }
 }
 

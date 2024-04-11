@@ -454,12 +454,8 @@ impl BlockSigner {
         match round_stage.stage {
             common::Stage::Stage1 | common::Stage::Stage2 => {},
             common::Stage::Stage3 | common::Stage::Stage3b => {
-                if let Some(true) = self.config.node.allow_final_stage_signing {
-                    log_signer!(Warn, self, "Allowing a late signing");
-                } else {
-                    log_signer!(Warn, self, "Avoiding a late signing");
-                    return Ok(None);
-                }
+                log_signer!(Warn, self, "Avoiding a late signing");
+                return Ok(None);
             }
         }
 
@@ -621,6 +617,10 @@ impl BlockSigner {
 
                 info.consensus_params
             },
+            Err(jsonrpc::Error::Transport(e)) => {
+                log!(Warn, "Cannot connect to elementsd {}. Retaining current parameters {}", e, self.active_dynafed_params);
+                elements::dynafed::Params::Full(self.cpe_set.get_params(self.active_dynafed_params).cloned().expect("Params must exist").params)
+            },
             Err(e) => {
                 log!(Warn, "Elements reports that dynafed is NOT active, using root params from config file: {}", e);
                 elements::dynafed::Params::Full(self.cpe_set.pre_dynafed_params().cloned().expect("Must have pre-dynafed parameters available").params)
@@ -674,18 +674,7 @@ impl rotator::Rotator for BlockSigner {
             log!(Error, "failed to update peer list: {}", e);
         }
 
-        let use_legacy_ordering = match self.config.node.allow_pre_dynafed_ordering {
-            Some(true) => {
-                self.active_dynafed_params == Default::default() ||
-                    self.cpe_set.legacy_params().is_none() ||
-                    self.active_dynafed_params == self.cpe_set.legacy_params().unwrap().root
-            },
-            _ => false
-        };
-        log!(Debug, "use_legacy_ordering: {}", use_legacy_ordering);
-
         update_fn(::dynafed::UpdateNotif {
-            use_legacy_ordering: use_legacy_ordering,
             peers: self.peers.clone(),
         });
     }
@@ -791,10 +780,6 @@ impl rotator::Rotator for BlockSigner {
     // 1/3 through the round, announce unsigned block
     fn round_stage2(&mut self, round_stage: RoundStage) {
         slog!(BlocksignerStartStage);
-
-        if ROLLOUTS.status_ack_elim != common::rollouts::StatusAckElim::Phase3 {
-            self.peer_mgr.broadcast_status_ack(round_stage);
-        }
 
         // Calculate and log the dynafed consensus voting based on the status
         // messages we received in stage 1.
@@ -1258,15 +1243,6 @@ impl rotator::Rotator for BlockSigner {
                 }
             }
 
-            // ** status ack **
-            message::Payload::StatusAck => {
-                if ROLLOUTS.status_ack_elim != common::rollouts::StatusAckElim::Phase3 {
-                    slog!(KickWatchdogForStatusAck, peer: peer);
-                    self.peer_mgr.send_network_watchdog_kick(peer);
-                } else {
-                    slog!(ReceivedStatusAck, peer: peer);
-                }
-            }
             // ** nack **
             message::Payload::Nack { reason } => {
                 log!(Debug, "peer {} sent nack: {}", peer, reason);

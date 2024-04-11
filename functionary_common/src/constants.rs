@@ -33,6 +33,10 @@ pub const MINIMUM_DUST_CHANGE: u64 = 1000;
 /// Currently hard-coded to 0.001BTC, the current minimum allowed pegout value in Liquid.
 pub const MINIMUM_OPPORTUNISTIC_CHANGE: u64 = 100000;
 
+/// The size factor that a sweep UTXO value needs to be above the current minimum economical
+/// value
+pub const MINIMUM_ECONOMICAL_SWEEP_FACTOR: u64 = 4;
+
 /// The maximum allowable weight of a signed mainchain transaction that we create.
 /// Bitcoin Core's default IsStandard rules have a limit of 400K for relaying, so
 /// this should be below this.

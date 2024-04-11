@@ -28,7 +28,8 @@ use std::time::{Instant, Duration};
 use bitcoin::secp256k1;
 
 use super::{NETWORK_MAGIC, Error};
-use message::{self, NetEncodable};
+use message;
+use network::NetEncodable;
 use utils::{self, ClearableQueue};
 
 /// Number of messages that can be buffered to an outgoing-connection

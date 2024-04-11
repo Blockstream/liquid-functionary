@@ -20,7 +20,7 @@
 //!
 
 use std::fmt;
-use std::{io, ops::Index};
+use std::ops::Index;
 use std::collections::HashSet;
 
 use bitcoin::hashes::sha256;
@@ -31,7 +31,6 @@ use miniscript::{TranslatePk, Descriptor, translate_hash_fail, Translator};
 
 use blocksigner::config::Configuration;
 use descriptor::LiquidDescriptor;
-use message;
 use tweak;
 use peer;
 
@@ -426,20 +425,6 @@ impl Index<usize> for CpeSet {
 
     fn index(&self, idx: usize) -> &Self::Output {
         &self.0[idx]
-    }
-}
-
-// Wrap elements consensus encoding to allow dynafed params
-// to be transferred over the network protocol
-impl message::NetEncodable for elements::dynafed::Params {
-    fn encode<W: io::Write>(&self, w: W) -> Result<usize, message::Error> {
-        elements::encode::Encodable::consensus_encode(self, w)
-            .map_err(message::Error::BadParseElements)
-    }
-
-    fn decode<R: io::Read>(r: R) -> Result<Self, message::Error> {
-        elements::encode::Decodable::consensus_decode(r)
-            .map_err(message::Error::BadParseElements)
     }
 }
 

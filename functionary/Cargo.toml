@@ -1,6 +1,6 @@
 [package]
 name = "functionary"
-version = "2.4.0"
+version = "2.4.1"
 authors = ["Andrew Poelstra <apoelstra@wpsoftware.net>"]
 license = "CC0-1.0"
 description = "Functionary utilities for Sidechain Elements"

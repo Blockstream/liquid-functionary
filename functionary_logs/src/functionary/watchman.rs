@@ -27,7 +27,7 @@ use std::fmt;
 use std::time::Duration;
 
 use bitcoin::hashes::{sha256, sha256d};
-use bitcoin::OutPoint;
+use bitcoin::{Amount, OutPoint};
 
 use common::{PakList, PeerId};
 
@@ -1014,6 +1014,8 @@ pub enum ProposalError {
         /// The name of the [NackReason]
         nack_name: String,
     },
+    /// Non-economical reclamation proposal
+    NonEconomicalReclamationProposal(Amount),
 }
 
 impl fmt::Display for ProposalError {
@@ -1063,6 +1065,8 @@ impl fmt::Display for ProposalError {
             ProposalError::HsmRefusedPak { nack_code, nack_name } => write!(f,
                 "the HSM refused PAK proof: {} (0x{:x})", nack_name, nack_code,
             ),
+            ProposalError::NonEconomicalReclamationProposal(amount) =>
+                write!(f, "reclamation proposal of amount {} was not economical", amount),
         }
     }
 }

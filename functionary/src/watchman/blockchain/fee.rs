@@ -25,8 +25,7 @@ use std::collections::{HashMap, HashSet};
 use bitcoin::{Amount, OutPoint, SignedAmount};
 use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
 
-use common::{constants, CONSTANTS};
-use message;
+use common::{constants, CONSTANTS, network};
 use logs::ProposalError;
 use utils;
 use rpc::{BitcoinRpc, EstimationMode};
@@ -372,15 +371,15 @@ pub struct PoolSummary {
     pub temporarily_docked: u64,
 }
 
-impl message::NetEncodable for PoolSummary {
-    fn encode<W: io::Write>(&self, mut w: W) -> Result<usize, message::Error> {
+impl network::NetEncodable for PoolSummary {
+    fn encode<W: io::Write>(&self, mut w: W) -> Result<usize, network::Error> {
         w.write_u64::<LittleEndian>(self.fee_rate)?;
         w.write_i64::<LittleEndian>(self.available_funds)?;
         w.write_u64::<LittleEndian>(self.temporarily_docked)?;
         Ok(8 * 3)
     }
 
-    fn decode<R: io::Read>(mut r: R) -> Result<Self, message::Error> {
+    fn decode<R: io::Read>(mut r: R) -> Result<Self, network::Error> {
         Ok(PoolSummary {
             fee_rate: r.read_u64::<LittleEndian>()?,
             available_funds: r.read_i64::<LittleEndian>()?,

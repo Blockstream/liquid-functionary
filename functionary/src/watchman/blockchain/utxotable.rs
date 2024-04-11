@@ -71,7 +71,7 @@ use bitcoin::hashes::{Hash, siphash24};
 use bitcoin::secp256k1::{rand, PublicKey};
 
 use common::BlockHeight;
-use common::constants::{CONSTANTS, MAX_PROPOSAL_TOTAL_HSM_PAYLOAD, MAX_PROPOSAL_TX_WEIGHT, MAXIMUM_REQUIRED_INPUTS};
+use common::constants::{CONSTANTS, MAX_PROPOSAL_TOTAL_HSM_PAYLOAD, MAX_PROPOSAL_TX_WEIGHT, MAXIMUM_REQUIRED_INPUTS, MINIMUM_ECONOMICAL_SWEEP_FACTOR};
 use descriptor::{LiquidDescriptor, TweakableDescriptor};
 use common::hsm;
 use logs::ProposalError;
@@ -464,11 +464,15 @@ pub enum Error {
     /// Not really an error - a transaction proposal resulted in no pegouts being
     /// processed or soon-expiring outputs being spent
     EmptyProposal,
+    /// Non-economical reclamation proposal
+    NonEconomicalReclamationProposal(Amount),
+    /// unknown proposal error
+    UnknownError(String)
 }
 
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        match *self {
+        match self {
             Error::AttemptedDoubleSpend(x) => write!(
                 f, "tx processes pegout {} without required conflicts", x,
             ),
@@ -476,6 +480,9 @@ impl fmt::Display for Error {
                 "could not fund proposal: got {}; need {}", available, needed,
             ),
             Error::EmptyProposal => write!(f, "nothing to propose"),
+            Error::NonEconomicalReclamationProposal(amount) =>
+                write!(f, "reclamation proposal of amount {} was not economical", amount),
+            Error::UnknownError(err) => write!(f, "unknown error: {}", err.as_str()),
         }
     }
 }
@@ -980,7 +987,9 @@ impl UtxoTable {
                     if let Err(e) = proposal.add_input(fee_pool, utxo) {
                         slog!(NotSpendingUtxo, outpoint: utxo.outpoint, error: e.to_string());
                     } else {
-                        if utxo.height + expiry < current_height + CONSTANTS.critical_expiry_threshold {
+                        if utxo.height + expiry < current_height + CONSTANTS.critical_expiry_threshold
+                            && utxo.value.to_sat() >= MINIMUM_ECONOMICAL_SWEEP_FACTOR * economical_amount.to_sat()
+                        {
                             really_critical = true;
                         }
                     }
@@ -1033,15 +1042,19 @@ impl UtxoTable {
         fee_pool: &fee::Pool,
         current_height: BlockHeight,
         available_signers: &'utxo HashSet<peer::Id>,
-    ) {
+    ) -> bool {
+        let mut reclaim_found = false;
         for utxo in self.reclaimable_utxos(Some(available_signers)) {
             slog!(ReclaimFailedPegin, outpoint: utxo.outpoint, value: utxo.value.to_sat(),
                 height: utxo.height,current_height: current_height
             );
             if let Err(e) = proposal.add_input(fee_pool, utxo) {
                 slog!(NotSpendingUtxo, outpoint: utxo.outpoint, error: e.to_string());
+            } else {
+                reclaim_found = true;
             }
         }
+        reclaim_found
     }
 
     /// Creates a transaction proposal
@@ -1072,7 +1085,12 @@ impl UtxoTable {
         let max_inputs = MAX_PROPOSAL_TX_WEIGHT / max_satisfaction_weight;
         let three_quarters_max_inputs = 3 * max_inputs / 4;
 
-        let min_amount = fee_pool.economical_amount(change_desc.signed_input_weight());
+        // Assume that the minimum economical weight is
+        // 1 signed federation input + 1 change output x 4 + 4 (tx_in count)
+        // + 4 (tx_out count) + 2 (segwit flags) + 16 (version) + 16 (locktime)
+        let min_economical_weight = change_desc.signed_input_weight() + 4 * proposal.change_txout_size() + 42;
+        let min_amount = fee_pool.economical_amount(min_economical_weight);
+
         slog!(StartTxProposal, fee_rate: fee_pool.summary().fee_rate,
             available_fees: fee_pool.summary().available_funds, economical_amount: min_amount.to_sat(),
             total_n_utxos: self.main_utxos.len(), total_n_pegouts: self.pegout_map.len(),
@@ -1083,9 +1101,11 @@ impl UtxoTable {
             change_spk: change_spk,
         );
 
+        // We use this amount for determining if sweeps are economical as they will ideally share a single change output
+        let min_economical_amount_input_only = fee_pool.economical_amount(change_desc.signed_input_weight());
         // 1. Add inputs that are near expiry
         let really_critical_added = self.add_critical_inputs(
-            &mut proposal, fee_pool, input_exclude, min_amount, bitcoin_tip, available_signers,
+            &mut proposal, fee_pool, input_exclude, min_economical_amount_input_only, bitcoin_tip, available_signers,
         );
 
         // Check if any of the explicitly selected UTXOs are spendable and if they are include them in the proposal
@@ -1240,6 +1260,7 @@ impl UtxoTable {
             log!(Info, "Overweight mitigation applied: threshold: {}, actual: {}", three_quarters_max_inputs, utxo_input_count);
         }
 
+        let mut performing_reclamation = false;
         // The transaction is complete except for change/fee adjustment.
         // Check that it makes any sense.
         if proposal.n_pegouts() == 0 && !fund_even_without_pegouts {
@@ -1247,7 +1268,7 @@ impl UtxoTable {
             proposal = transaction::Proposal::new(change_spk);
 
             // Check if there are any failed pegin's marked for sweeping
-            self.check_and_add_failed_pegin_reclamations(
+            performing_reclamation = self.check_and_add_failed_pegin_reclamations(
                 &mut proposal,
                 fee_pool,
                 bitcoin_tip,
@@ -1263,9 +1284,25 @@ impl UtxoTable {
         // 3. Replace the phantom change output with multiple pegin-sized
         //    change outputs, if this is possible and desired
         self.proposal_sanity(&proposal, change_spk);
-        proposal.adjust_change(
-            fee_pool, &mut utxos_iter, desired_n_main_outputs, n_outputs_with_pending,
-        );
+        match proposal.adjust_change(
+            fee_pool,
+            &mut utxos_iter,
+            desired_n_main_outputs,
+            n_outputs_with_pending,
+            min_amount,
+            performing_reclamation
+        ) {
+            Ok(_) => (),
+            Err(ProposalError::NonEconomicalReclamationProposal(amount)) => {
+                return Err(Error::NonEconomicalReclamationProposal(amount));
+            },
+            // Currently there are no other possible proposal errors this method can return but this will
+            // catch future ones if they are missed.
+            Err(e) => {
+                log!(Error, "unhandled proposal error: {}", e);
+                return Err(Error::UnknownError(e.to_string()));
+            }
+        }
         self.proposal_sanity(&proposal, change_spk);
 
         Ok(proposal)
